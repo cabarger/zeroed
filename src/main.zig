@@ -19,6 +19,7 @@ pub fn main() !void {
     const perm_ally = perm_arena.allocator();
 
     const font = rl.LoadFontEx("FiraCode-Regular.ttf", 30, null, 0);
+
     var cursor_index: u32 = 0;
     _ = cursor_index;
     var cursor_row: u32 = 0;
@@ -54,7 +55,7 @@ pub fn main() !void {
                 continue;
             }
             if (point == rl.KEY_ENTER) {
-                y_offset += 1;
+                y_offset += glyph_info.image.offsetY + glyph_info.image.height;
                 x_offset = 0;
                 continue;
             }
@@ -68,18 +69,13 @@ pub fn main() !void {
                 .{
                     .x = @floatFromInt(x_offset),
                     .y = @floatFromInt(
-                        @as(c_int, @intCast(y_offset)) * font.baseSize,
+                        @as(c_int, @intCast(y_offset)) + glyph_info.image.offsetY + glyph_info.image.height,
                     ),
                 },
                 @floatFromInt(font.baseSize),
                 rl.WHITE,
             );
-
-            x_offset += glyph_info.advanceX;
-
-            // std.debug.print("{?}\n", .{glyph_info});
-
-            // unreachable;
+            x_offset += glyph_info.image.width;
         }
 
         rl.EndDrawing();
