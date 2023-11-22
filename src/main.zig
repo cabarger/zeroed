@@ -6,7 +6,7 @@
 //! Compiler: zig 0.11.0
 //!
 
-// - Nav / basic actions [X]
+// - Nav / basic actions [ ]
 //     - Scrolling [ ]
 // - Command buffer
 //    - Draw command buffer
@@ -16,7 +16,6 @@
 //        - New buffer from file
 //    - Switch buffers
 // - Time between key press
-// - Smooth scrolling!!!!!!!
 
 // TODO(caleb):
 // - Move off of raylib's key input
@@ -35,10 +34,12 @@ const Mode = enum {
 
 const Buffer = struct {
     selection_start: usize,
-    selection_end: usize,
     cursor_index: usize,
     points: ArrayList(c_int),
 };
+
+var screen_width: usize = 1680;
+var screen_height: usize = 1050;
 
 fn cursorColFromIndex(points: *ArrayList(c_int), current_index: usize) usize {
     var result: usize = 0;
@@ -128,19 +129,6 @@ fn cursorLeftIndex(points: *ArrayList(c_int), cursor_index: usize) usize {
     return cursor_index;
 }
 
-/// Get point index which is <= 5 lines above cursor pos
-fn startPointIndexFromCursor(points: *ArrayList(c_int), cursor_index: usize) usize {
-    var point_index = cursor_index;
-    var newline_count: usize = 0;
-    while (point_index != 0) : (point_index -= 1) {
-        if (points.items[point_index - 1] == '\n')
-            newline_count += 1;
-        if (newline_count > 5)
-            break;
-    }
-    return point_index;
-}
-
 /// How many rows from start point index
 fn rowsFromStartPoint(points: *ArrayList(c_int), start_index: usize, cursor_index: usize) usize {
     var result: usize = 0;
@@ -151,10 +139,7 @@ fn rowsFromStartPoint(points: *ArrayList(c_int), start_index: usize, cursor_inde
     return result;
 }
 
-// if rows_from_start <= 5
-// compute new start index
-
-fn cursorPFromIndex(
+fn cellPFromIndex(
     cursor_index: usize,
     buffer_points: *const ArrayList(c_int),
     sample_glyph_info: *const rl.GlyphInfo,
@@ -176,11 +161,27 @@ fn cursorPFromIndex(
     return cursor_p;
 }
 
-pub fn main() !void {
-    const screen_width: c_int = 1680;
-    const screen_height: c_int = 1050;
+fn startPointIndexFromCameraP(
+    buffer_points: *const ArrayList(c_int),
+    sample_glyph_info: *const rl.GlyphInfo,
+    font: *const rl.Font,
+    camera_p: rl.Vector2,
+) usize {
+    _ = sample_glyph_info;
+    var point_index: usize = 0;
+    const start_row: isize = @intFromFloat(@floor(camera_p.y / @as(f32, @floatFromInt(font.baseSize))));
+    var nl_count: usize = 0;
+    while (nl_count < start_row - 1 and
+        point_index < buffer_points.items.len) : (point_index += 1)
+    {
+        if (buffer_points.items[point_index] == '\n')
+            nl_count += 1;
+    }
+    return point_index;
+}
 
-    rl.InitWindow(screen_width, screen_height, "zed");
+pub fn main() !void {
+    rl.InitWindow(@intCast(screen_width), @intCast(screen_height), "zed");
     rl.SetConfigFlags(rl.FLAG_MSAA_4X_HINT);
     rl.SetWindowState(rl.FLAG_WINDOW_HIGHDPI);
     rl.SetTargetFPS(60);
@@ -193,13 +194,12 @@ pub fn main() !void {
     const buffer_ally = buffer_arena.allocator();
     const scratch_ally = scratch_arena.allocator();
 
-    const font = rl.LoadFontEx("FiraCode-Regular.ttf", 32, null, 0);
+    const font = rl.LoadFontEx("FiraCode-Regular.ttf", 30, null, 0);
     const sample_glyph_info: rl.GlyphInfo =
         rl.GetGlyphInfo(font, ' ');
 
-    const rows: usize = @intCast(@divFloor(screen_height, font.baseSize));
-    _ = rows;
-    const cols: usize = @intCast(@divFloor(screen_width, sample_glyph_info.image.width));
+    var rows: usize = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
+    var cols: usize = @divFloor(screen_width, @as(usize, @intCast(sample_glyph_info.image.width)));
 
     var mode: Mode = .normal;
 
@@ -207,12 +207,13 @@ pub fn main() !void {
         .cursor_index = 0,
         .points = ArrayList(c_int).init(buffer_ally),
         .selection_start = 0,
-        .selection_end = 0,
     };
-    var command_buffer = ArrayList(c_int).init(scratch_ally);
+
+    var command_points_index: usize = 0;
+    var command_points = ArrayList(c_int).init(scratch_ally);
 
     // NOTE(caleb): Debug... Load build.zig as initial buffer.
-    var buildf = try std.fs.cwd().openFile("build.zig", .{});
+    var buildf = try std.fs.cwd().openFile("src/main.zig", .{});
     var build_reader = buildf.reader();
     while (build_reader.readByte() catch null) |byte| {
         const int_byte: c_int = @intCast(byte);
@@ -228,9 +229,14 @@ pub fn main() !void {
     };
     var target_p = camera.target;
 
-    var start_point_index: usize = 0; //startPointIndexFromCursor(&default_buffer.points, default_buffer.cursor_index);
-
     while (!rl.WindowShouldClose()) {
+        if (rl.IsWindowResized()) {
+            screen_width = @intCast(rl.GetScreenWidth());
+            screen_height = @intCast(rl.GetScreenHeight());
+            rows = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
+            cols = @divFloor(screen_width, @as(usize, @intCast(sample_glyph_info.image.width)));
+        }
+
         const ctrl_is_held = rl.IsKeyDown(rl.KEY_LEFT_CONTROL);
         var char_pressed: c_int = rl.GetCharPressed();
         var key_pressed: c_int = rl.GetKeyPressed();
@@ -256,26 +262,26 @@ pub fn main() !void {
                     } else if (ctrl_is_held and key_pressed == rl.KEY_D) {
                         target_p = rl.Vector2{
                             .x = camera.target.x,
-                            .y = camera.target.y + @as(f32, @floatFromInt(font.baseSize * 20)),
+                            .y = camera.target.y + @as(f32, @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2))))),
                         };
-                        for (0..20) |_|
+                        for (0..@divFloor(rows, 2)) |_|
                             default_buffer.cursor_index = cursorDownIndex(&default_buffer.points, default_buffer.cursor_index);
                     } else if (ctrl_is_held and key_pressed == rl.KEY_U) {
                         target_p = rl.Vector2{
                             .x = camera.target.x,
-                            .y = camera.target.y - @as(f32, @floatFromInt(font.baseSize * 20)),
+                            .y = camera.target.y - @as(f32, @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2))))),
                         };
-                        for (0..20) |_|
+                        for (0..@divFloor(rows, 2)) |_|
                             default_buffer.cursor_index = cursorUpIndex(&default_buffer.points, default_buffer.cursor_index);
                     }
 
                     if (char_pressed == 'v') {
                         default_buffer.selection_start = default_buffer.cursor_index;
-                        default_buffer.selection_end = default_buffer.cursor_index + 1;
                         mode = .select;
                     } else if (char_pressed == ':') {
+                        command_points_index = 0;
+                        command_points.clearRetainingCapacity();
                         mode = .command;
-                        try command_buffer.append(':');
                     } else if (char_pressed == 'd') {
                         if (default_buffer.points.items.len > 0)
                             _ = default_buffer.points.orderedRemove(default_buffer.cursor_index);
@@ -292,6 +298,15 @@ pub fn main() !void {
                             try default_buffer.points.insert(default_buffer.cursor_index, '\n');
                         default_buffer.cursor_index += 1;
                         mode = .insert;
+                    } else if (char_pressed == 'x') {
+                        default_buffer.selection_start = default_buffer.cursor_index;
+                        default_buffer.selection_start -= cursorColFromIndex(
+                            &default_buffer.points,
+                            default_buffer.cursor_index,
+                        );
+                        const line_len = lineLenFromIndex(&default_buffer.points, default_buffer.cursor_index);
+                        default_buffer.cursor_index = default_buffer.selection_start + line_len - 1;
+                        mode = .select;
                     }
                 },
                 .insert => {
@@ -323,24 +338,53 @@ pub fn main() !void {
                 .command => {
                     if (key_pressed == rl.KEY_CAPS_LOCK) {
                         mode = .normal;
+                    } else if (key_pressed == rl.KEY_BACKSPACE) {
+                        if (command_points_index != 0 and
+                            command_points.items.len > command_points_index - 1)
+                        {
+                            command_points_index -= 1;
+                            _ = command_points.orderedRemove(command_points_index);
+                        }
+                    }
+
+                    if (char_pressed != 0) {
+                        try command_points.insert(command_points_index, char_pressed);
+                        command_points_index += 1;
                     }
                 },
                 .select => {
                     if (key_pressed == rl.KEY_CAPS_LOCK) {
                         mode = .normal;
+                    } else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
+                        default_buffer.cursor_index = cursorUpIndex(&default_buffer.points, default_buffer.cursor_index);
+                    } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') { // FIXME(caleb): Use math!!!
+                        default_buffer.cursor_index = cursorDownIndex(&default_buffer.points, default_buffer.cursor_index);
                     } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
-                        default_buffer.selection_end = cursorRightIndex(&default_buffer.points, default_buffer.selection_end);
+                        default_buffer.cursor_index = cursorRightIndex(
+                            &default_buffer.points,
+                            default_buffer.cursor_index,
+                        );
+                    } else if (key_pressed == rl.KEY_LEFT or char_pressed == 'h') {
+                        default_buffer.cursor_index = cursorLeftIndex(
+                            &default_buffer.points,
+                            default_buffer.cursor_index,
+                        );
+                    } else if (char_pressed == 'x') {
+                        default_buffer.selection_start = default_buffer.cursor_index;
+                        default_buffer.selection_start -= cursorColFromIndex(
+                            &default_buffer.points,
+                            default_buffer.cursor_index,
+                        );
+                        const line_len = lineLenFromIndex(&default_buffer.points, default_buffer.cursor_index);
+                        default_buffer.cursor_index = default_buffer.selection_start + line_len - 1;
                     }
 
-                    // FIXME(caleb): !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                     if (char_pressed == 'd') {
-                        std.debug.print("{d}:{d}\n", .{ default_buffer.selection_start, default_buffer.selection_end });
-                        for (default_buffer.selection_start..default_buffer.selection_end) |selection_index| {
-                            std.debug.print("{d}", .{selection_index});
-                            const a = default_buffer.points.orderedRemove(selection_index);
-                            const point_u32: u32 = @intCast(a);
-                            std.debug.print("{c}\n", .{@as(u8, @truncate(point_u32))});
-                        }
+                        const start = @min(default_buffer.selection_start, default_buffer.cursor_index);
+                        const end = @max(default_buffer.selection_start, default_buffer.cursor_index) + 1;
+                        for (0..end - start) |_|
+                            _ = default_buffer.points.orderedRemove(start);
+                        default_buffer.cursor_index = start;
                         mode = .normal;
                     }
                 },
@@ -358,25 +402,38 @@ pub fn main() !void {
             );
         }
 
-        // Update start draw point
-        // const rows_from_start = rowsFromStartPoint(&default_buffer.points, start_point_index, default_buffer.cursor_index);
-        // std.debug.print("rfs: {d}\n", .{rows_from_start});
-        // if (rows_from_start <= 5) {
-        //     start_point_index = startPointIndexFromCursor(&default_buffer.points, default_buffer.cursor_index);
-        // }
-
         rl.BeginDrawing();
+
         rl.ClearBackground(rl.Color{ .r = 0, .g = 0, .b = 0, .a = 255 });
+        rl.DrawFPS(0, 0);
 
         rl.BeginMode2D(camera);
 
         // Draw buffer
         {
+            // Figures out start/end cell index to begin drawing from
+            const start_point_index = startPointIndexFromCameraP(
+                &default_buffer.points,
+                &sample_glyph_info,
+                &font,
+                camera.target,
+            );
+            var end_point_index = start_point_index;
+            for (0..rows + @divFloor(rows, 4)) |_|
+                end_point_index = cursorDownIndex(&default_buffer.points, end_point_index);
+
+            // Offset in text (world) space.
+            const start_p = cellPFromIndex(
+                start_point_index,
+                &default_buffer.points,
+                &sample_glyph_info,
+                &font,
+            );
             var x_offset: c_int = 0;
-            var y_offset: c_int = 0;
-            for (default_buffer.points.items[start_point_index..]) |point| {
+            var y_offset: c_int = @intFromFloat(@floor(start_p.y));
+            for (default_buffer.points.items[start_point_index .. end_point_index + 1]) |point| {
                 if (point == '\n') {
-                    y_offset += 1;
+                    y_offset += font.baseSize;
                     x_offset = 0;
                     continue;
                 }
@@ -390,9 +447,7 @@ pub fn main() !void {
                     point,
                     .{
                         .x = @floatFromInt(x_offset),
-                        .y = @floatFromInt(
-                            @as(c_int, @intCast(y_offset)) * font.baseSize,
-                        ),
+                        .y = @floatFromInt(y_offset),
                     },
                     @floatFromInt(font.baseSize),
                     rl.WHITE,
@@ -401,7 +456,7 @@ pub fn main() !void {
             }
         }
 
-        var cursor_p = cursorPFromIndex(
+        var cursor_p = cellPFromIndex(
             default_buffer.cursor_index,
             &default_buffer.points,
             &sample_glyph_info,
@@ -418,7 +473,7 @@ pub fn main() !void {
         );
 
         // Draw cursor
-        if (mode == .normal) {
+        if (mode == .normal) { // Block
             rl.DrawRectangle(
                 @as(c_int, @intFromFloat(cursor_p.x)),
                 @as(c_int, @intFromFloat(cursor_p.y)),
@@ -426,7 +481,7 @@ pub fn main() !void {
                 font.baseSize,
                 rl.Color{ .r = 255, .g = 255, .b = 255, .a = 128 },
             );
-        } else if (mode == .insert) {
+        } else if (mode == .insert) { // Line
             rl.DrawLineEx(
                 cursor_p,
                 rl.Vector2{
@@ -436,31 +491,95 @@ pub fn main() !void {
                 2.0,
                 rl.Color{ .r = 255, .g = 255, .b = 255, .a = 128 },
             );
+        } else if (mode == .select) { // Underscore
+            rl.DrawLineEx(
+                rl.Vector2{
+                    .x = cursor_p.x,
+                    .y = cursor_p.y + @as(f32, @floatFromInt(font.baseSize)),
+                },
+                rl.Vector2{
+                    .x = cursor_p.x + @as(f32, @floatFromInt(sample_glyph_info.image.width)),
+                    .y = cursor_p.y + @as(f32, @floatFromInt(font.baseSize)),
+                },
+                2.0,
+                rl.Color{ .r = 255, .g = 255, .b = 255, .a = 128 },
+            );
         }
 
         // Draw selection
         if (mode == .select) {
-            for (default_buffer.selection_start..default_buffer.selection_end) |selection_index| {
-                var selection_cell_p = cursorPFromIndex(
-                    selection_index,
-                    &default_buffer.points,
-                    &sample_glyph_info,
-                    &font,
-                );
+            const start = @min(default_buffer.selection_start, default_buffer.cursor_index);
+            const end = @max(default_buffer.selection_start, default_buffer.cursor_index);
+            var selection_cell_p = cellPFromIndex(
+                start,
+                &default_buffer.points,
+                &sample_glyph_info,
+                &font,
+            );
+
+            var x_offset: c_int = @intFromFloat(@floor(selection_cell_p.x));
+            var y_offset: c_int = @intFromFloat(@floor(selection_cell_p.y));
+            for (default_buffer.points.items[start..(end + 1)], 0..) |point, point_index| {
+                _ = point_index;
+
                 rl.DrawRectangle(
-                    @as(c_int, @intFromFloat(selection_cell_p.x)),
-                    @as(c_int, @intFromFloat(selection_cell_p.y)),
+                    x_offset,
+                    y_offset,
                     sample_glyph_info.image.width,
                     font.baseSize,
                     rl.Color{ .r = 255, .g = 0xa5, .b = 0x00, .a = 128 },
                 );
+
+                if (point == '\n') {
+                    y_offset += font.baseSize;
+                    x_offset = 0;
+                } else if (point == '\t') {
+                    x_offset += sample_glyph_info.image.width * 4;
+                } else {
+                    x_offset += sample_glyph_info.image.width;
+                }
             }
         }
 
         rl.EndMode2D();
 
         // Draw command buffer
-        if (mode == .command) {}
+        if (mode == .command) {
+            rl.DrawRectangle(
+                0,
+                font.baseSize * @as(c_int, @intCast(rows - 1)),
+                @as(c_int, @intCast(cols)) * sample_glyph_info.image.width,
+                font.baseSize,
+                rl.Color{ .r = 0, .g = 0, .b = 0, .a = 255 },
+            );
+
+            rl.DrawTextCodepoint(font, ':', .{
+                .x = 0,
+                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(rows - 1))),
+            }, @floatFromInt(font.baseSize), rl.WHITE);
+
+            var x_offset: c_int = sample_glyph_info.image.width;
+            for (command_points.items) |point| {
+                rl.DrawTextCodepoint(font, point, .{
+                    .x = @floatFromInt(x_offset),
+                    .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(rows - 1))),
+                }, @floatFromInt(font.baseSize), rl.WHITE);
+                x_offset += sample_glyph_info.image.width;
+            }
+
+            rl.DrawRectangle(
+                sample_glyph_info.image.width * @as(c_int, @intCast(command_points_index + 1)),
+                font.baseSize * @as(c_int, @intCast(rows - 1)),
+                sample_glyph_info.image.width,
+                font.baseSize,
+                rl.Color{
+                    .r = 255,
+                    .g = 255,
+                    .b = 255,
+                    .a = 128,
+                },
+            );
+        }
 
         rl.EndDrawing();
     }
