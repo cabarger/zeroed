@@ -7,7 +7,9 @@
 //!
 
 // - Nav / basic actions - in progress
-//     - Scrolling
+//     - '<' '>'  indent shifting
+//     - Selection highlighting
+//     - Scrolling (almost done?!)
 // - Command buffer
 //    - Draw command buffer
 //    - 'w' command
@@ -25,6 +27,7 @@
 const std = @import("std");
 const rl = @import("rl.zig");
 
+const heap = std.heap;
 const ArrayList = std.ArrayList;
 
 const Mode = enum {
@@ -140,8 +143,9 @@ fn cellPFromCoords(
     font: *const rl.Font,
 ) rl.Vector2 {
     var cursor_p = rl.Vector2{ .x = 0.0, .y = @floatFromInt(coords.row * @as(usize, @intCast(font.baseSize))) };
-    const point_end = line_break_indices.items[coords.row] + 1;
-    const point_start = point_end - lineLenFromRow(line_break_indices, coords.row);
+    var point_start: usize = 0;
+    if (coords.row > 0)
+        point_start = line_break_indices.items[coords.row - 1] + 1;
     for (buffer_points.items[point_start .. point_start + coords.col]) |point| {
         if (point == '\t') {
             cursor_p.x += @floatFromInt(sample_glyph_info.image.width * 4);
@@ -192,20 +196,20 @@ pub fn main() !void {
     rl.SetWindowState(rl.FLAG_WINDOW_HIGHDPI | rl.FLAG_WINDOW_RESIZABLE);
     rl.SetTargetFPS(1000);
 
-    var buffer_arena =
-        std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    var scratch_arena =
-        std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var fba_bytes = try heap.page_allocator.alloc(u8, 1024 * 1000);
+    var fba = heap.FixedBufferAllocator.init(fba_bytes);
 
-    const buffer_ally = buffer_arena.allocator();
-    const scratch_ally = scratch_arena.allocator();
+    var buffer_arena =
+        heap.ArenaAllocator.init(fba.allocator());
+    var scratch_arena =
+        heap.ArenaAllocator.init(fba.allocator());
 
     const font = rl.LoadFontEx("ComicMono.ttf", 30, null, 0);
     const sample_glyph_info: rl.GlyphInfo =
         rl.GetGlyphInfo(font, ' ');
 
-    var rows: usize = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
-    var cols: usize = @divFloor(screen_width, @as(usize, @intCast(sample_glyph_info.image.width)));
+    var rows: usize = @divTrunc(screen_height, @as(usize, @intCast(font.baseSize)));
+    var cols: usize = @divTrunc(screen_width, @as(usize, @intCast(sample_glyph_info.image.width)));
 
     var mode: Mode = .normal;
 
@@ -214,8 +218,8 @@ pub fn main() !void {
             .row = 0,
             .col = 0,
         },
-        .points = ArrayList(c_int).init(buffer_ally),
-        .line_break_indices = ArrayList(usize).init(buffer_ally),
+        .points = ArrayList(c_int).init(buffer_arena.allocator()),
+        .line_break_indices = ArrayList(usize).init(buffer_arena.allocator()),
         .selection_start = .{
             .row = 0,
             .col = 0,
@@ -223,7 +227,7 @@ pub fn main() !void {
     };
 
     var command_points_index: usize = 0;
-    var command_points = ArrayList(c_int).init(scratch_ally);
+    var command_points = ArrayList(u8).init(scratch_arena.allocator());
 
     // NOTE(caleb): DEBUG... Load *.zig into default buffer.
     var buildf = try std.fs.cwd().openFile("src/main.zig", .{});
@@ -239,19 +243,16 @@ pub fn main() !void {
         if (point == '\n')
             try default_buffer.line_break_indices.append(point_index);
 
-    DEBUGPrintLineIndices(
-        &default_buffer.line_break_indices,
-        &default_buffer.points,
-    );
-
     var camera = rl.Camera2D{
         .offset = .{ .x = 0.0, .y = 0.0 },
         .target = .{ .x = 0.0, .y = 0.0 },
-        .rotation = 0.0,
+        .rotation = 0,
         .zoom = 1.0,
     };
+    var target_rot: f32 = 0.0;
     var target_p = camera.target;
     var draw_debug_info = false;
+    var DEBUG_glyphs_drawn_this_frame: usize = 0;
 
     while (!rl.WindowShouldClose()) {
         if (rl.IsWindowResized()) {
@@ -282,12 +283,30 @@ pub fn main() !void {
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
                         );
-                    } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') { // FIXME(caleb): Use math!!!
+                        const cursor_p = rl.Vector2{
+                            .x = camera.target.x, // FIXME(caleb)
+                            .y = @as(f32, @floatFromInt(
+                                default_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
+                            )),
+                        };
+                        if (cursor_p.y < camera.target.y) {
+                            target_p = rl.Vector2Subtract(target_p, .{ .x = 0, .y = @floatFromInt(font.baseSize) });
+                        }
+                    } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
                         default_buffer.cursor_coords = cursorCoordsDown(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
                         );
+                        const cursor_p = rl.Vector2{
+                            .x = camera.target.x, // FIXME(caleb)
+                            .y = @as(f32, @floatFromInt(
+                                default_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
+                            )),
+                        };
+                        if (cursor_p.y > (camera.target.y + @as(f32, @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize)))))) {
+                            target_p = rl.Vector2Subtract(cursor_p, .{ .x = 0, .y = @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize))) });
+                        }
                     } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
                         default_buffer.cursor_coords = cursorCoordsRight(
                             &default_buffer.line_break_indices,
@@ -301,10 +320,10 @@ pub fn main() !void {
                             default_buffer.cursor_coords.col,
                         );
                     } else if (ctrl_is_held and key_pressed == rl.KEY_D) {
-                        target_p = rl.Vector2{
-                            .x = camera.target.x,
-                            .y = camera.target.y + @as(f32, @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2))))),
-                        };
+                        target_p = rl.Vector2Add(target_p, .{
+                            .x = 0,
+                            .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2)))),
+                        });
                         for (0..@divFloor(rows, 2)) |_|
                             default_buffer.cursor_coords = cursorCoordsDown(
                                 &default_buffer.line_break_indices,
@@ -312,10 +331,10 @@ pub fn main() !void {
                                 default_buffer.cursor_coords.col,
                             );
                     } else if (ctrl_is_held and key_pressed == rl.KEY_U) {
-                        target_p = rl.Vector2{
-                            .x = camera.target.x,
-                            .y = camera.target.y - @as(f32, @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2))))),
-                        };
+                        target_p = rl.Vector2Subtract(target_p, .{
+                            .x = 0,
+                            .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2)))),
+                        });
                         for (0..@divFloor(rows, 2)) |_|
                             default_buffer.cursor_coords = cursorCoordsUp(
                                 &default_buffer.line_break_indices,
@@ -331,12 +350,46 @@ pub fn main() !void {
                         command_points_index = 0;
                         command_points.clearRetainingCapacity();
                         mode = .command;
+                    } else if (char_pressed == '>') { // TODO(caleb): Also operate on shift width amount of whitespace i.e. 4
+                        const point_index = pointIndexFromCoords(
+                            &default_buffer.line_break_indices,
+                            default_buffer.cursor_coords,
+                        );
+                        const line_start = point_index - default_buffer.cursor_coords.col;
+                        try default_buffer.points.insert(line_start, '\t');
+                        for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index|
+                            lb_index.* += 1;
+                    } else if (char_pressed == '<') {
+                        const point_index = pointIndexFromCoords(
+                            &default_buffer.line_break_indices,
+                            default_buffer.cursor_coords,
+                        );
+                        const line_start = point_index - default_buffer.cursor_coords.col;
+                        for (default_buffer.points.items[line_start..], 0..) |point, offset| {
+                            if (point == '\t') { // Do removal
+                                _ = default_buffer.points.orderedRemove(line_start + offset);
+                                for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index|
+                                    lb_index.* -= 1;
+                                break;
+                            } else if (point == ' ') { // Ignore
+                                continue;
+                            } else { // If not tab or whitespace, done.
+                                break;
+                            }
+                        }
                     } else if (char_pressed == 'd') {
-                        if (default_buffer.points.items.len > 0)
-                            _ = default_buffer.points.orderedRemove(pointIndexFromCoords(
-                                &default_buffer.line_break_indices,
-                                default_buffer.cursor_coords,
-                            ));
+                        const point_index = pointIndexFromCoords(
+                            &default_buffer.line_break_indices,
+                            default_buffer.cursor_coords,
+                        );
+                        if (point_index != 0) {
+                            for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index|
+                                lb_index.* -= 1;
+                            if (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row - 1] ==
+                                default_buffer.line_break_indices.items[default_buffer.cursor_coords.row])
+                                _ = default_buffer.line_break_indices.orderedRemove(default_buffer.cursor_coords.row);
+                            _ = default_buffer.points.orderedRemove(point_index);
+                        }
                     } else if (char_pressed == 'A') {
                         default_buffer.cursor_coords.col = lineLenFromRow(
                             &default_buffer.line_break_indices,
@@ -352,9 +405,8 @@ pub fn main() !void {
 
                         if (point_index == default_buffer.points.items.len) {
                             try default_buffer.points.insert(point_index, '\n');
-                            for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index| {
+                            for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index|
                                 lb_index.* += 1;
-                            }
                         }
                         default_buffer.cursor_coords = cursorCoordsRight(
                             &default_buffer.line_break_indices,
@@ -397,9 +449,13 @@ pub fn main() !void {
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords,
                         );
-                        if (point_index != 0 and
-                            default_buffer.points.items.len > point_index - 1)
-                        {
+                        if (point_index != 0) {
+                            for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index|
+                                lb_index.* -= 1;
+                            if (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row - 1] ==
+                                default_buffer.line_break_indices.items[default_buffer.cursor_coords.row])
+                                _ = default_buffer.line_break_indices.orderedRemove(default_buffer.cursor_coords.row);
+
                             default_buffer.cursor_coords = cursorCoordsLeft(
                                 &default_buffer.line_break_indices,
                                 default_buffer.cursor_coords.row,
@@ -413,14 +469,21 @@ pub fn main() !void {
                             default_buffer.cursor_coords,
                         );
                         try default_buffer.points.insert(point_index, '\n');
-                        default_buffer.cursor_coords = cursorCoordsRight(
-                            &default_buffer.line_break_indices,
-                            default_buffer.cursor_coords.row,
-                            default_buffer.cursor_coords.col,
-                        );
-                        // If inserting at end of buffer a second newline should be added as well!
-                        if (point_index + 1 == default_buffer.points.items.len)
-                            try default_buffer.points.insert(point_index + 1, '\n');
+
+                        const old_line_len =
+                            lineLenFromRow(&default_buffer.line_break_indices, default_buffer.cursor_coords.row);
+                        const increment_len = old_line_len - default_buffer.cursor_coords.col;
+
+                        default_buffer.line_break_indices.items[default_buffer.cursor_coords.row] = point_index;
+
+                        default_buffer.cursor_coords.row += 1;
+                        default_buffer.cursor_coords.col = 0;
+
+                        try default_buffer.line_break_indices.insert(default_buffer.cursor_coords.row, point_index + increment_len);
+                        for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row + 1 ..]) |*lb_index|
+                            lb_index.* += 1;
+
+                        // FIXME(caleb): If inserting at end of buffer a second newline should be added as well!
                     } else if (key_pressed == rl.KEY_TAB) {
                         const point_index = pointIndexFromCoords(
                             &default_buffer.line_break_indices,
@@ -437,6 +500,12 @@ pub fn main() !void {
                 .command => {
                     if (key_pressed == rl.KEY_CAPS_LOCK) {
                         mode = .normal;
+                    } else if (key_pressed == rl.KEY_ENTER) {
+                        // evaluate buffer
+                        if (std.mem.eql(u8, command_points.items, "barrel-role")) {
+                            target_rot = 360;
+                        }
+                        mode = .normal;
                     } else if (key_pressed == rl.KEY_BACKSPACE) {
                         if (command_points_index != 0 and
                             command_points.items.len > command_points_index - 1)
@@ -447,7 +516,7 @@ pub fn main() !void {
                     }
 
                     if (char_pressed != 0) {
-                        try command_points.insert(command_points_index, char_pressed);
+                        try command_points.insert(command_points_index, @intCast(char_pressed));
                         command_points_index += 1;
                     }
                 },
@@ -460,12 +529,30 @@ pub fn main() !void {
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
                         );
-                    } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') { // FIXME(caleb): Use math!!!
+                        const cursor_p = rl.Vector2{
+                            .x = camera.target.x, // FIXME(caleb)
+                            .y = @as(f32, @floatFromInt(
+                                default_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
+                            )),
+                        };
+                        if (cursor_p.y < camera.target.y) {
+                            target_p = rl.Vector2Subtract(target_p, .{ .x = 0, .y = @floatFromInt(font.baseSize) });
+                        }
+                    } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
                         default_buffer.cursor_coords = cursorCoordsDown(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
                         );
+                        const cursor_p = rl.Vector2{
+                            .x = camera.target.x, // FIXME(caleb)
+                            .y = @as(f32, @floatFromInt(
+                                default_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
+                            )),
+                        };
+                        if (cursor_p.y > (camera.target.y + @as(f32, @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize)))))) {
+                            target_p = rl.Vector2Subtract(cursor_p, .{ .x = 0, .y = @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize))) });
+                        }
                     } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
                         default_buffer.cursor_coords = cursorCoordsRight(
                             &default_buffer.line_break_indices,
@@ -501,7 +588,6 @@ pub fn main() !void {
                         const end = @max(selection_start_point_index, cursor_coords_point_index) + 1;
                         for (0..end - start) |_|
                             _ = default_buffer.points.orderedRemove(start);
-                        // default_buffer.cursor_index = start;
                         mode = .normal;
                     }
                 },
@@ -515,9 +601,19 @@ pub fn main() !void {
             camera.target = rl.Vector2Lerp(
                 camera.target,
                 target_p,
-                0.15,
+                0.05,
             );
         }
+
+        // Barrel role
+        if (@round(camera.rotation) != target_rot) {
+            camera.rotation = rl.Lerp(camera.rotation, target_rot, 0.05);
+        } else { // Done rolling
+            target_rot = 0.0;
+            camera.rotation = 0.0;
+        }
+
+        DEBUG_glyphs_drawn_this_frame = 0;
 
         rl.BeginDrawing();
 
@@ -527,58 +623,86 @@ pub fn main() !void {
 
         // Draw buffer
         {
-            // Figures out start/end cell index to begin drawing from
-            const camera_row: isize = @intFromFloat(@divExact(
-                @round(camera.target.y),
-                @as(f32, @floatFromInt(font.baseSize)),
-            ));
-            var start_point_index: usize = 0;
-            if (camera_row > 0) {
-                start_point_index = default_buffer.line_break_indices.items[@intCast(camera_row)] + 1;
-            }
-            var end_point_index: usize = default_buffer.points.items.len - 1;
-            const end_camera_row = @as(usize, @intCast(camera_row)) + rows; // + @divFloor(rows, 4);
-            if (end_camera_row < default_buffer.line_break_indices.items.len) {
-                end_point_index = default_buffer.line_break_indices.items[end_camera_row] + 1;
-            }
-            var x_offset: c_int = 0;
-            var y_offset: c_int = @intCast(camera_row * @as(isize, @intCast(font.baseSize)));
-            for (default_buffer.points.items[start_point_index..end_point_index]) |point| {
-                if (point == '\n') {
-                    y_offset += font.baseSize;
-                    x_offset = 0;
-                    continue;
-                }
-                if (point == '\t') {
-                    x_offset += sample_glyph_info.image.width * 4;
-                    continue;
-                }
+            const start_camera_row: usize = @min(
+                default_buffer.line_break_indices.items.len - 1,
+                @as(usize, @intFromFloat(@divExact(
+                    @max(0.0, @round(camera.target.y)),
+                    @as(f32, @floatFromInt(font.baseSize)),
+                ))),
+            );
+            const end_camera_row = @min(default_buffer.line_break_indices.items.len, start_camera_row + rows + 2);
+            for (start_camera_row..end_camera_row) |row_index| {
+                var x_offset: c_int = 0;
+                var y_offset: c_int = @intCast(row_index * @as(usize, @intCast(font.baseSize)));
 
-                rl.DrawTextCodepoint(
-                    font,
-                    point,
-                    .{
-                        .x = @floatFromInt(x_offset),
-                        .y = @floatFromInt(y_offset),
-                    },
-                    @floatFromInt(font.baseSize),
-                    rl.WHITE,
+                // Line numbers
+                var temp_arena = heap.ArenaAllocator.init(scratch_arena.allocator());
+                defer _ = temp_arena.reset(.free_all);
+
+                const line_number_str = try std.fmt.allocPrint(
+                    temp_arena.allocator(),
+                    "{d: >4}",
+                    .{row_index + 1},
                 );
+
+                for (line_number_str) |digit_char| {
+                    rl.DrawTextCodepoint(
+                        font,
+                        digit_char,
+                        .{
+                            .x = @floatFromInt(x_offset),
+                            .y = @floatFromInt(y_offset),
+                        },
+                        @floatFromInt(font.baseSize),
+                        rl.WHITE,
+                    );
+                    DEBUG_glyphs_drawn_this_frame += 1;
+                    x_offset += sample_glyph_info.image.width;
+                }
                 x_offset += sample_glyph_info.image.width;
+
+                var start_point_index: usize = 0;
+                if (row_index > 0)
+                    start_point_index = default_buffer.line_break_indices.items[row_index - 1] + 1;
+                const end_point_index = start_point_index + lineLenFromRow(&default_buffer.line_break_indices, row_index);
+                for (default_buffer.points.items[start_point_index..end_point_index]) |point| {
+                    if (point == '\n') {
+                        y_offset += font.baseSize;
+                        x_offset = sample_glyph_info.image.width * 5;
+                        continue;
+                    }
+                    if (point == '\t') {
+                        x_offset += sample_glyph_info.image.width * 4;
+                        continue;
+                    }
+                    rl.DrawTextCodepoint(
+                        font,
+                        point,
+                        .{
+                            .x = @floatFromInt(x_offset),
+                            .y = @floatFromInt(y_offset),
+                        },
+                        @floatFromInt(font.baseSize),
+                        rl.WHITE,
+                    );
+                    DEBUG_glyphs_drawn_this_frame += 1;
+                    x_offset += sample_glyph_info.image.width;
+                }
             }
         }
 
-        const cursor_p = cellPFromCoords(
+        var cursor_p = cellPFromCoords(
             default_buffer.cursor_coords,
             &default_buffer.points,
             &default_buffer.line_break_indices,
             &sample_glyph_info,
             &font,
         );
+        cursor_p.x += @floatFromInt(sample_glyph_info.image.width * 5);
 
         // Draw line highlight
         rl.DrawRectangle(
-            0,
+            @as(c_int, @intFromFloat(cursor_p.x)),
             @as(c_int, @intFromFloat(cursor_p.y)),
             @as(c_int, @intCast(cols)) * sample_glyph_info.image.width,
             font.baseSize,
@@ -620,37 +744,41 @@ pub fn main() !void {
         }
 
         // Draw selection
-        if (mode == .select) {
-            // const start = @min(default_buffer.selection_start, default_buffer.cursor_index);
-            // const end = @max(default_buffer.selection_start, default_buffer.cursor_index);
-            // var selection_cell_p = cellPFromIndex(
-            //     start,
-            //     &default_buffer.points,
-            //     &sample_glyph_info,
-            //     &font,
-            // );
-            // var x_offset: c_int = @intFromFloat(@floor(selection_cell_p.x));
-            // var y_offset: c_int = @intFromFloat(@floor(selection_cell_p.y));
-            // for (default_buffer.points.items[start..(end + 1)], 0..) |point, point_index| {
-            //     _ = point_index;
+        if (mode == .select) { // FIXME(caleb): Only draw selections that can be seen
+            const cursor_point = pointIndexFromCoords(&default_buffer.line_break_indices, default_buffer.cursor_coords);
+            const selection_point = pointIndexFromCoords(&default_buffer.line_break_indices, default_buffer.selection_start);
+            const start_point_index = @min(cursor_point, selection_point);
+            const end_point_index = @max(cursor_point, selection_point);
 
-            //     rl.DrawRectangle(
-            //         x_offset,
-            //         y_offset,
-            //         sample_glyph_info.image.width,
-            //         font.baseSize,
-            //         rl.Color{ .r = 255, .g = 0xa5, .b = 0x00, .a = 128 },
-            //     );
+            var x_offset: c_int = 0;
+            var y_offset: c_int = 0;
+            if (start_point_index == cursor_point) {
+                x_offset = @as(c_int, @intCast(default_buffer.cursor_coords.col)) * sample_glyph_info.image.width + sample_glyph_info.image.width * 5;
+                y_offset = @as(c_int, @intCast(default_buffer.cursor_coords.row)) * font.baseSize;
+            } else {
+                x_offset = @as(c_int, @intCast(default_buffer.selection_start.col)) * sample_glyph_info.image.width + sample_glyph_info.image.width * 5;
+                y_offset = @as(c_int, @intCast(default_buffer.selection_start.row)) * font.baseSize;
+            }
 
-            //     if (point == '\n') {
-            //         y_offset += font.baseSize;
-            //         x_offset = 0;
-            //     } else if (point == '\t') {
-            //         x_offset += sample_glyph_info.image.width * 4;
-            //     } else {
-            //         x_offset += sample_glyph_info.image.width;
-            //     }
-            // }
+            for (default_buffer.points.items[start_point_index .. end_point_index + 1]) |point| {
+                rl.DrawRectangle(
+                    x_offset,
+                    y_offset,
+                    sample_glyph_info.image.width,
+                    font.baseSize,
+                    rl.Color{ .r = 255, .g = 0xa5, .b = 0x00, .a = 128 },
+                );
+
+                if (point == '\n') {
+                    y_offset += font.baseSize;
+                    x_offset = sample_glyph_info.image.width * 4;
+                }
+                if (point == '\t') {
+                    x_offset += sample_glyph_info.image.width * 4;
+                } else {
+                    x_offset += sample_glyph_info.image.width;
+                }
+            }
         }
 
         rl.EndMode2D();
@@ -669,6 +797,7 @@ pub fn main() !void {
                 .x = 0,
                 .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(rows - 1))),
             }, @floatFromInt(font.baseSize), rl.WHITE);
+            DEBUG_glyphs_drawn_this_frame += 1;
 
             var x_offset: c_int = sample_glyph_info.image.width;
             for (command_points.items) |point| {
@@ -676,6 +805,7 @@ pub fn main() !void {
                     .x = @floatFromInt(x_offset),
                     .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(rows - 1))),
                 }, @floatFromInt(font.baseSize), rl.WHITE);
+                DEBUG_glyphs_drawn_this_frame += 1;
                 x_offset += sample_glyph_info.image.width;
             }
 
@@ -695,42 +825,27 @@ pub fn main() !void {
 
         // Draw debug info
         if (draw_debug_info) {
-            const scratch_restore = scratch_arena.state;
+            var temp_arena = heap.ArenaAllocator.init(scratch_arena.allocator());
+            defer _ = temp_arena.reset(.free_all);
 
-            const fpsz = try std.fmt.allocPrintZ(scratch_ally, "fps: {d}", .{rl.GetFPS()});
+            const fpsz = try std.fmt.allocPrintZ(temp_arena.allocator(), "fps: {d}", .{rl.GetFPS()});
             rl.DrawTextEx(font, fpsz, .{
                 .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * sample_glyph_info.image.width, 4) * 3),
-                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 4) * 3),
+                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8),
             }, @floatFromInt(font.baseSize), 0, rl.RED);
 
-            // Figures out start/end cell index to begin drawing from
-            const camera_row: isize = @intFromFloat(@divExact(
-                @round(camera.target.y),
-                @as(f32, @floatFromInt(font.baseSize)),
-            ));
-            var start_point_index: usize = 0;
-            if (camera_row > 0) {
-                start_point_index = default_buffer.line_break_indices.items[@intCast(camera_row)] + 1;
-                // start_point_index -= lineLenFromRow(&default_buffer.line_break_indices, @intCast(camera_row));
-            }
-            var end_point_index: usize = default_buffer.points.items.len - 1;
-            const end_camera_row = @as(usize, @intCast(camera_row)) + rows; // + @divFloor(rows, 4);
-            if (end_camera_row < default_buffer.line_break_indices.items.len) {
-                end_point_index = default_buffer.line_break_indices.items[end_camera_row] + 1;
-            }
-
             const glyph_draw_countz = try std.fmt.allocPrintZ(
-                scratch_ally,
+                temp_arena.allocator(),
                 "glyphs drawn: {d}",
-                .{end_point_index - start_point_index},
+                .{DEBUG_glyphs_drawn_this_frame},
             );
             rl.DrawTextEx(font, glyph_draw_countz, .{
                 .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * sample_glyph_info.image.width, 4) * 3),
-                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 4) * 3 + font.baseSize),
+                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8 + font.baseSize),
             }, @floatFromInt(font.baseSize), 0, rl.RED);
 
             const point_indexz = try std.fmt.allocPrintZ(
-                scratch_ally,
+                temp_arena.allocator(),
                 "point index: {d}",
                 .{pointIndexFromCoords(
                     &default_buffer.line_break_indices,
@@ -739,11 +854,11 @@ pub fn main() !void {
             );
             rl.DrawTextEx(font, point_indexz, .{
                 .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * sample_glyph_info.image.width, 4) * 3),
-                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 4) * 3 + font.baseSize * 2),
+                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8 + font.baseSize * 2),
             }, @floatFromInt(font.baseSize), 0, rl.RED);
 
             const cursor_coordsz = try std.fmt.allocPrintZ(
-                scratch_ally,
+                temp_arena.allocator(),
                 "cursor_p: ({d}, {d})",
                 .{
                     default_buffer.cursor_coords.row,
@@ -752,12 +867,22 @@ pub fn main() !void {
             );
             rl.DrawTextEx(font, cursor_coordsz, .{
                 .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * sample_glyph_info.image.width, 4) * 3),
-                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 4) * 3 + font.baseSize * 3),
+                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8 + font.baseSize * 3),
             }, @floatFromInt(font.baseSize), 0, rl.RED);
 
-            scratch_arena.state = scratch_restore;
+            const mem_usedz = try std.fmt.allocPrintZ(
+                temp_arena.allocator(),
+                "mem: {d}/{d}KB",
+                .{
+                    @divTrunc(fba.end_index, 1024),
+                    @divExact(fba.buffer.len, 1024),
+                },
+            );
+            rl.DrawTextEx(font, mem_usedz, .{
+                .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * sample_glyph_info.image.width, 4) * 3),
+                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8 + font.baseSize * 4),
+            }, @floatFromInt(font.baseSize), 0, rl.RED);
         }
-
         rl.EndDrawing();
     }
 
