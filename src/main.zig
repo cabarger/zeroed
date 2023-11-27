@@ -8,6 +8,7 @@
 
 // - Nav / basic actions - in progress
 //     - '<' '>'  indent shifting
+//         - move points to u8
 //     - Selection highlighting
 //     - Scrolling (almost done?!)
 // - Command buffer
@@ -49,6 +50,8 @@ const Buffer = struct {
     line_break_indices: ArrayList(usize),
 };
 
+const shift_width = 4;
+
 var screen_width: usize = 800;
 var screen_height: usize = 600;
 
@@ -69,7 +72,7 @@ inline fn lineLenFromRow(
     return result;
 }
 
-inline fn cursorCoordsRight(
+inline fn cellCoordsRight(
     line_break_indices: *ArrayList(usize),
     row: usize,
     col: usize,
@@ -87,7 +90,7 @@ inline fn cursorCoordsRight(
     return result;
 }
 
-inline fn cursorCoordsLeft(
+inline fn cellCoordsLeft(
     line_break_indices: *ArrayList(usize),
     row: usize,
     col: usize,
@@ -105,7 +108,7 @@ inline fn cursorCoordsLeft(
     return result;
 }
 
-inline fn cursorCoordsUp(
+inline fn cellCoordsUp(
     line_break_indices: *ArrayList(usize),
     row: usize,
     col: usize,
@@ -120,7 +123,7 @@ inline fn cursorCoordsUp(
     return result;
 }
 
-inline fn cursorCoordsDown(
+inline fn cellCoordsDown(
     line_break_indices: *ArrayList(usize),
     row: usize,
     col: usize,
@@ -142,7 +145,10 @@ fn cellPFromCoords(
     sample_glyph_info: *const rl.GlyphInfo,
     font: *const rl.Font,
 ) rl.Vector2 {
-    var cursor_p = rl.Vector2{ .x = 0.0, .y = @floatFromInt(coords.row * @as(usize, @intCast(font.baseSize))) };
+    var cursor_p = rl.Vector2{
+        .x = 0.0,
+        .y = @floatFromInt(coords.row * @as(usize, @intCast(font.baseSize))),
+    };
     var point_start: usize = 0;
     if (coords.row > 0)
         point_start = line_break_indices.items[coords.row - 1] + 1;
@@ -154,6 +160,15 @@ fn cellPFromCoords(
         }
     }
     return cursor_p;
+}
+
+inline fn shiftLineBreakIndices(
+    lb_indices: *ArrayList(usize),
+    start_row: usize,
+    shift_amount: isize,
+) void {
+    for (lb_indices.items[start_row..]) |*point_index|
+        point_index.* = @intCast(@as(isize, @intCast(point_index.*)) + shift_amount);
 }
 
 fn DEBUGPrintLineIndices(line_break_indices: *ArrayList(usize), points: *ArrayList(c_int)) void {
@@ -190,13 +205,33 @@ fn startPointIndexFromCameraP(
     return point_index;
 }
 
+inline fn indentPoints(points: *ArrayList(c_int), point_index: usize) !void {
+    for (0..shift_width) |shift_width_index|
+        try points.insert(point_index + shift_width_index, ' ');
+}
+
+fn sanatizePoints(scratch_arena: *std.heap.ArenaAllocator, points: *ArrayList(c_int)) !void {
+    var temp_arena = heap.ArenaAllocator.init(scratch_arena.allocator());
+    defer _ = temp_arena.reset(.free_all);
+
+    var tab_indices_list = ArrayList(usize).init(temp_arena.allocator());
+    for (points.items, 0..) |point, point_index| {
+        if (point == '\t')
+            try tab_indices_list.append(point_index);
+    }
+    for (tab_indices_list.items) |tab_index| {
+        _ = points.orderedRemove(tab_index);
+        try indentPoints(points, tab_index);
+    }
+}
+
 pub fn main() !void {
     rl.InitWindow(@intCast(screen_width), @intCast(screen_height), "zed");
     rl.SetConfigFlags(rl.FLAG_MSAA_4X_HINT);
     rl.SetWindowState(rl.FLAG_WINDOW_HIGHDPI | rl.FLAG_WINDOW_RESIZABLE);
     rl.SetTargetFPS(1000);
 
-    var fba_bytes = try heap.page_allocator.alloc(u8, 1024 * 1000);
+    var fba_bytes = try heap.page_allocator.alloc(u8, 1024 * 1024); // 1mb
     var fba = heap.FixedBufferAllocator.init(fba_bytes);
 
     var buffer_arena =
@@ -204,7 +239,7 @@ pub fn main() !void {
     var scratch_arena =
         heap.ArenaAllocator.init(fba.allocator());
 
-    const font = rl.LoadFontEx("ComicMono.ttf", 30, null, 0);
+    const font = rl.LoadFontEx("FiraCode-Regular.ttf", 25, null, 0);
     const sample_glyph_info: rl.GlyphInfo =
         rl.GetGlyphInfo(font, ' ');
 
@@ -243,6 +278,11 @@ pub fn main() !void {
         if (point == '\n')
             try default_buffer.line_break_indices.append(point_index);
 
+    try sanatizePoints(
+        &scratch_arena,
+        &default_buffer.points,
+    );
+
     var camera = rl.Camera2D{
         .offset = .{ .x = 0.0, .y = 0.0 },
         .target = .{ .x = 0.0, .y = 0.0 },
@@ -278,7 +318,7 @@ pub fn main() !void {
                     } else if (key_pressed == rl.KEY_EQUAL) {
                         camera.zoom += 0.1;
                     } else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
-                        default_buffer.cursor_coords = cursorCoordsUp(
+                        default_buffer.cursor_coords = cellCoordsUp(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
@@ -293,7 +333,7 @@ pub fn main() !void {
                             target_p = rl.Vector2Subtract(target_p, .{ .x = 0, .y = @floatFromInt(font.baseSize) });
                         }
                     } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
-                        default_buffer.cursor_coords = cursorCoordsDown(
+                        default_buffer.cursor_coords = cellCoordsDown(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
@@ -308,13 +348,13 @@ pub fn main() !void {
                             target_p = rl.Vector2Subtract(cursor_p, .{ .x = 0, .y = @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize))) });
                         }
                     } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
-                        default_buffer.cursor_coords = cursorCoordsRight(
+                        default_buffer.cursor_coords = cellCoordsRight(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
                         );
                     } else if (key_pressed == rl.KEY_LEFT or char_pressed == 'h') {
-                        default_buffer.cursor_coords = cursorCoordsLeft(
+                        default_buffer.cursor_coords = cellCoordsLeft(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
@@ -325,7 +365,7 @@ pub fn main() !void {
                             .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2)))),
                         });
                         for (0..@divFloor(rows, 2)) |_|
-                            default_buffer.cursor_coords = cursorCoordsDown(
+                            default_buffer.cursor_coords = cellCoordsDown(
                                 &default_buffer.line_break_indices,
                                 default_buffer.cursor_coords.row,
                                 default_buffer.cursor_coords.col,
@@ -336,7 +376,7 @@ pub fn main() !void {
                             .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2)))),
                         });
                         for (0..@divFloor(rows, 2)) |_|
-                            default_buffer.cursor_coords = cursorCoordsUp(
+                            default_buffer.cursor_coords = cellCoordsUp(
                                 &default_buffer.line_break_indices,
                                 default_buffer.cursor_coords.row,
                                 default_buffer.cursor_coords.col,
@@ -350,32 +390,39 @@ pub fn main() !void {
                         command_points_index = 0;
                         command_points.clearRetainingCapacity();
                         mode = .command;
-                    } else if (char_pressed == '>') { // TODO(caleb): Also operate on shift width amount of whitespace i.e. 4
+                    } else if (char_pressed == '>') {
                         const point_index = pointIndexFromCoords(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords,
                         );
                         const line_start = point_index - default_buffer.cursor_coords.col;
-                        try default_buffer.points.insert(line_start, '\t');
-                        for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index|
-                            lb_index.* += 1;
+                        try indentPoints(&default_buffer.points, line_start);
+                        shiftLineBreakIndices(
+                            &default_buffer.line_break_indices,
+                            default_buffer.cursor_coords.row,
+                            shift_width,
+                        );
                     } else if (char_pressed == '<') {
                         const point_index = pointIndexFromCoords(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords,
                         );
                         const line_start = point_index - default_buffer.cursor_coords.col;
-                        for (default_buffer.points.items[line_start..], 0..) |point, offset| {
-                            if (point == '\t') { // Do removal
-                                _ = default_buffer.points.orderedRemove(line_start + offset);
-                                for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index|
-                                    lb_index.* -= 1;
+                        var white_space_count: usize = 0;
+                        for (default_buffer.points.items[line_start..]) |point| {
+                            if (point == ' ')
+                                white_space_count += 1;
+                            if (white_space_count == shift_width or point != ' ')
                                 break;
-                            } else if (point == ' ') { // Ignore
-                                continue;
-                            } else { // If not tab or whitespace, done.
-                                break;
-                            }
+                        }
+                        if (white_space_count > 0) {
+                            for (0..white_space_count) |_|
+                                _ = default_buffer.points.orderedRemove(line_start);
+                            shiftLineBreakIndices(
+                                &default_buffer.line_break_indices,
+                                default_buffer.cursor_coords.row,
+                                -@as(isize, @intCast(white_space_count)),
+                            );
                         }
                     } else if (char_pressed == 'd') {
                         const point_index = pointIndexFromCoords(
@@ -383,8 +430,11 @@ pub fn main() !void {
                             default_buffer.cursor_coords,
                         );
                         if (point_index != 0) {
-                            for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index|
-                                lb_index.* -= 1;
+                            shiftLineBreakIndices(
+                                &default_buffer.line_break_indices,
+                                default_buffer.cursor_coords.row,
+                                -1,
+                            );
                             if (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row - 1] ==
                                 default_buffer.line_break_indices.items[default_buffer.cursor_coords.row])
                                 _ = default_buffer.line_break_indices.orderedRemove(default_buffer.cursor_coords.row);
@@ -405,10 +455,13 @@ pub fn main() !void {
 
                         if (point_index == default_buffer.points.items.len) {
                             try default_buffer.points.insert(point_index, '\n');
-                            for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index|
-                                lb_index.* += 1;
+                            shiftLineBreakIndices(
+                                &default_buffer.line_break_indices,
+                                default_buffer.cursor_coords.row,
+                                1,
+                            );
                         }
-                        default_buffer.cursor_coords = cursorCoordsRight(
+                        default_buffer.cursor_coords = cellCoordsRight(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
@@ -431,11 +484,13 @@ pub fn main() !void {
                             default_buffer.cursor_coords,
                         );
                         try default_buffer.points.insert(point_index, char_pressed);
+                        shiftLineBreakIndices(
+                            &default_buffer.line_break_indices,
+                            default_buffer.cursor_coords.row,
+                            1,
+                        );
 
-                        for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index| {
-                            lb_index.* += 1;
-                        }
-                        default_buffer.cursor_coords = cursorCoordsRight(
+                        default_buffer.cursor_coords = cellCoordsRight(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
@@ -450,13 +505,16 @@ pub fn main() !void {
                             default_buffer.cursor_coords,
                         );
                         if (point_index != 0) {
-                            for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row..]) |*lb_index|
-                                lb_index.* -= 1;
+                            shiftLineBreakIndices(
+                                &default_buffer.line_break_indices,
+                                default_buffer.cursor_coords.row,
+                                -1,
+                            );
                             if (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row - 1] ==
                                 default_buffer.line_break_indices.items[default_buffer.cursor_coords.row])
                                 _ = default_buffer.line_break_indices.orderedRemove(default_buffer.cursor_coords.row);
 
-                            default_buffer.cursor_coords = cursorCoordsLeft(
+                            default_buffer.cursor_coords = cellCoordsLeft(
                                 &default_buffer.line_break_indices,
                                 default_buffer.cursor_coords.row,
                                 default_buffer.cursor_coords.col,
@@ -480,8 +538,11 @@ pub fn main() !void {
                         default_buffer.cursor_coords.col = 0;
 
                         try default_buffer.line_break_indices.insert(default_buffer.cursor_coords.row, point_index + increment_len);
-                        for (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row + 1 ..]) |*lb_index|
-                            lb_index.* += 1;
+                        shiftLineBreakIndices(
+                            &default_buffer.line_break_indices,
+                            default_buffer.cursor_coords.row,
+                            1,
+                        );
 
                         // FIXME(caleb): If inserting at end of buffer a second newline should be added as well!
                     } else if (key_pressed == rl.KEY_TAB) {
@@ -489,20 +550,20 @@ pub fn main() !void {
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords,
                         );
-                        try default_buffer.points.insert(point_index, '\t');
-                        default_buffer.cursor_coords = cursorCoordsRight(
+                        try indentPoints(&default_buffer.points, point_index);
+                        shiftLineBreakIndices(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
-                            default_buffer.cursor_coords.col,
+                            shift_width,
                         );
+                        default_buffer.cursor_coords.col += shift_width;
                     }
                 },
                 .command => {
                     if (key_pressed == rl.KEY_CAPS_LOCK) {
                         mode = .normal;
-                    } else if (key_pressed == rl.KEY_ENTER) {
-                        // evaluate buffer
-                        if (std.mem.eql(u8, command_points.items, "barrel-role")) {
+                    } else if (key_pressed == rl.KEY_ENTER) { // Evaluate command buffer
+                        if (std.mem.eql(u8, command_points.items, "barrel-roll")) {
                             target_rot = 360;
                         }
                         mode = .normal;
@@ -524,7 +585,7 @@ pub fn main() !void {
                     if (key_pressed == rl.KEY_CAPS_LOCK) {
                         mode = .normal;
                     } else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
-                        default_buffer.cursor_coords = cursorCoordsUp(
+                        default_buffer.cursor_coords = cellCoordsUp(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
@@ -539,7 +600,7 @@ pub fn main() !void {
                             target_p = rl.Vector2Subtract(target_p, .{ .x = 0, .y = @floatFromInt(font.baseSize) });
                         }
                     } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
-                        default_buffer.cursor_coords = cursorCoordsDown(
+                        default_buffer.cursor_coords = cellCoordsDown(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
@@ -554,27 +615,27 @@ pub fn main() !void {
                             target_p = rl.Vector2Subtract(cursor_p, .{ .x = 0, .y = @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize))) });
                         }
                     } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
-                        default_buffer.cursor_coords = cursorCoordsRight(
+                        default_buffer.cursor_coords = cellCoordsRight(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
                         );
                     } else if (key_pressed == rl.KEY_LEFT or char_pressed == 'h') {
-                        default_buffer.cursor_coords = cursorCoordsLeft(
+                        default_buffer.cursor_coords = cellCoordsLeft(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                             default_buffer.cursor_coords.col,
                         );
-                    } else if (char_pressed == 'x') {
+                    }
+
+                    if (char_pressed == 'x') {
                         default_buffer.selection_start.col = 0;
                         default_buffer.selection_start.row = default_buffer.cursor_coords.row;
                         default_buffer.cursor_coords.col = lineLenFromRow(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
                         ) - 1;
-                    }
-
-                    if (char_pressed == 'd') {
+                    } else if (char_pressed == 'd') {
                         const selection_start_point_index = pointIndexFromCoords(
                             &default_buffer.line_break_indices,
                             default_buffer.selection_start,
@@ -605,7 +666,7 @@ pub fn main() !void {
             );
         }
 
-        // Barrel role
+        // Barrel roll
         if (@round(camera.rotation) != target_rot) {
             camera.rotation = rl.Lerp(camera.rotation, target_rot, 0.05);
         } else { // Done rolling
@@ -889,15 +950,8 @@ pub fn main() !void {
     var dumpf = try std.fs.cwd().createFile("delme.cpp", .{});
     var dump_writer = dumpf.writer();
     for (default_buffer.points.items) |point| {
-        if (point == '\t') {
-            try dump_writer.writeByte(' ');
-            try dump_writer.writeByte(' ');
-            try dump_writer.writeByte(' ');
-            try dump_writer.writeByte(' ');
-        } else {
-            const point_u32: u32 = @intCast(point);
-            try dump_writer.writeByte(@truncate(point_u32));
-        }
+        const point_u32: u32 = @intCast(point);
+        try dump_writer.writeByte(@truncate(point_u32));
     }
     dumpf.close();
 
