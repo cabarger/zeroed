@@ -6,6 +6,7 @@
 //! Compiler: zig 0.11.0
 //!
 
+// - Basic history
 // - Nav / basic actions - in progress
 //     - '<' '>'  indent shifting
 //         - move points to u8
@@ -27,7 +28,6 @@
 
 const std = @import("std");
 const rl = @import("rl.zig");
-const vk = @import("vk.zig");
 
 const mem = std.mem;
 const heap = std.heap;
@@ -204,23 +204,23 @@ fn startPointIndexFromCameraP(
     return point_index;
 }
 
-inline fn indentPoints(points: *ArrayList(c_int), point_index: usize) !void {
+inline fn indentPoints(points: *ArrayList(c_int), point_index: usize) void {
     for (0..shift_width) |shift_width_index|
-        try points.insert(point_index + shift_width_index, ' ');
+        points.insert(point_index + shift_width_index, ' ') catch unreachable;
 }
 
-fn sanatizePoints(scratch_arena: *std.heap.ArenaAllocator, points: *ArrayList(c_int)) !void {
+fn sanatizePoints(scratch_arena: *std.heap.ArenaAllocator, points: *ArrayList(c_int)) void {
     var temp_arena = heap.ArenaAllocator.init(scratch_arena.allocator());
     defer _ = temp_arena.reset(.free_all);
 
     var tab_indices_list = ArrayList(usize).init(temp_arena.allocator());
     for (points.items, 0..) |point, point_index| {
         if (point == '\t')
-            try tab_indices_list.append(point_index);
+            tab_indices_list.append(point_index) catch unreachable;
     }
     for (tab_indices_list.items) |tab_index| {
         _ = points.orderedRemove(tab_index);
-        try indentPoints(points, tab_index);
+        indentPoints(points, tab_index);
     }
 }
 
@@ -239,31 +239,7 @@ pub fn main() !void {
         heap.ArenaAllocator.init(fba.allocator());
     _ = perm_arena;
 
-    // var vk_instance: vk.VkInstance = undefined;
-    // var app_info = mem.zeroes(vk.VkApplicationInfo);
-    // app_info.sType = vk.VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    // const app_namez = try std.fmt.allocPrintZ(perm_arena.allocator(), "Zero Editor", .{});
-    // app_info.pApplicationName = app_namez.ptr;
-    // app_info.applicationVersion = vk.VK_MAKE_VERSION(1, 0, 0);
-    // const engine_namez = try std.fmt.allocPrintZ(perm_arena.allocator(), "No Engine", .{});
-    // app_info.pEngineName = engine_namez.ptr;
-    // app_info.engineVersion = vk.VK_MAKE_VERSION(0, 0, 1);
-    // app_info.apiVersion = vk.VK_API_VERSION_1_0;
-
-    // const validation_layerz = try std.fmt.allocPrintZ(perm_arena.allocator(), "VK_LAYER_KHRONOS_validation", .{});
-    // const enabled_layers = [_][*c]const u8{validation_layerz.ptr};
-
-    // var create_info = mem.zeroes(vk.VkInstanceCreateInfo);
-    // create_info.sType = vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    // create_info.pApplicationInfo = &app_info;
-    // create_info.enabledLayerCount = 1;
-    // create_info.ppEnabledLayerNames = &enabled_layers;
-
-    // if (vk.vkCreateInstance(&create_info, null, &vk_instance) != vk.VK_SUCCESS) {
-    //     unreachable; // Instance creation failed
-    // }
-
-    rl.InitWindow(@intCast(screen_width), @intCast(screen_height), "zero-ed");
+    rl.InitWindow(@intCast(screen_width), @intCast(screen_height), "Zeroed");
     rl.SetConfigFlags(rl.FLAG_MSAA_4X_HINT);
     rl.SetWindowState(rl.FLAG_WINDOW_HIGHDPI | rl.FLAG_WINDOW_RESIZABLE);
     rl.SetTargetFPS(60);
@@ -302,7 +278,7 @@ pub fn main() !void {
     }
     buildf.close();
 
-    try sanatizePoints(
+    sanatizePoints(
         &scratch_arena,
         &default_buffer.points,
     );
@@ -310,7 +286,7 @@ pub fn main() !void {
     // Compute line indices
     for (default_buffer.points.items, 0..) |point, point_index|
         if (point == '\n')
-            try default_buffer.line_break_indices.append(point_index);
+            default_buffer.line_break_indices.append(point_index) catch unreachable;
 
     var camera = rl.Camera2D{
         .offset = .{ .x = 0.0, .y = 0.0 },
@@ -435,7 +411,7 @@ pub fn main() !void {
                             default_buffer.cursor_coords,
                         );
                         const line_start = point_index - default_buffer.cursor_coords.col;
-                        try indentPoints(&default_buffer.points, line_start);
+                        indentPoints(&default_buffer.points, line_start);
                         shiftLineBreakIndices(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
@@ -544,52 +520,82 @@ pub fn main() !void {
                             default_buffer.cursor_coords,
                         );
                         if (point_index != 0) {
+                            // NOTE(caleb): Can I/Should I couple point removals/insertions and line
+                            // break index updates???
+                            const removed_point =
+                                default_buffer.points.orderedRemove(point_index - 1);
                             shiftLineBreakIndices(
                                 &default_buffer.line_break_indices,
                                 default_buffer.cursor_coords.row,
                                 -1,
                             );
-                            if (default_buffer.line_break_indices.items[default_buffer.cursor_coords.row - 1] ==
-                                default_buffer.line_break_indices.items[default_buffer.cursor_coords.row])
-                                _ = default_buffer.line_break_indices.orderedRemove(default_buffer.cursor_coords.row);
+                            if (removed_point == '\n') { // When hitting a newline
+                                const nuked_line_len = lineLenFromRow( // Get remaining line len
+                                    &default_buffer.line_break_indices,
+                                    default_buffer.cursor_coords.row,
+                                );
+                                _ = default_buffer.line_break_indices.orderedRemove(
+                                    default_buffer.cursor_coords.row,
+                                );
+                                default_buffer.line_break_indices.items[default_buffer.cursor_coords.row - 1] += nuked_line_len;
 
+                                // Update cursor coords
+                                // default_buffer.cursor_coords = cellCoordsLeft(
+                                //     &default_buffer.line_break_indices,
+                                //     default_buffer.cursor_coords.row,
+                                //     default_buffer.cursor_coords.col,
+                                // );
+                                // default_buffer.cursor_coords.col -= nuked_line_len - 1;
+                            }
                             default_buffer.cursor_coords = cellCoordsLeft(
                                 &default_buffer.line_break_indices,
                                 default_buffer.cursor_coords.row,
                                 default_buffer.cursor_coords.col,
                             );
-                            _ = default_buffer.points.orderedRemove(point_index - 1);
                         }
                     } else if (key_pressed == rl.KEY_ENTER) {
+                        // Where is this in the points buffer
                         const point_index = pointIndexFromCoords(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords,
                         );
-                        try default_buffer.points.insert(point_index, '\n');
 
+                        // Line length prior to newline insertion
                         const old_line_len =
-                            lineLenFromRow(&default_buffer.line_break_indices, default_buffer.cursor_coords.row);
-                        const increment_len = old_line_len - default_buffer.cursor_coords.col;
-
-                        default_buffer.line_break_indices.items[default_buffer.cursor_coords.row] = point_index;
-
-                        default_buffer.cursor_coords.row += 1;
-                        default_buffer.cursor_coords.col = 0;
-
-                        try default_buffer.line_break_indices.insert(default_buffer.cursor_coords.row, point_index + increment_len);
-                        shiftLineBreakIndices(
+                            lineLenFromRow(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
+                        );
+
+                        // How much to increment line break indices
+                        const increment_len = old_line_len - default_buffer.cursor_coords.col;
+
+                        // Set current row to newline point index
+                        default_buffer.line_break_indices.items[default_buffer.cursor_coords.row] = point_index;
+                        try default_buffer.line_break_indices.insert(default_buffer.cursor_coords.row + 1, point_index + increment_len - 1);
+                        shiftLineBreakIndices(
+                            &default_buffer.line_break_indices,
+                            default_buffer.cursor_coords.row + 1,
                             1,
                         );
 
+                        // Insert the newline
+                        try default_buffer.points.insert(point_index, '\n');
+
+                        default_buffer.cursor_coords = cellCoordsRight(
+                            &default_buffer.line_break_indices,
+                            default_buffer.cursor_coords.row,
+                            default_buffer.cursor_coords.col,
+                        );
+
                         // FIXME(caleb): If inserting at end of buffer a second newline should be added as well!
+                        DEBUGPrintLineIndices(&default_buffer.line_break_indices, &default_buffer.points);
                     } else if (key_pressed == rl.KEY_TAB) {
                         const point_index = pointIndexFromCoords(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords,
                         );
-                        try indentPoints(&default_buffer.points, point_index);
+                        indentPoints(&default_buffer.points, point_index);
                         shiftLineBreakIndices(
                             &default_buffer.line_break_indices,
                             default_buffer.cursor_coords.row,
@@ -602,8 +608,28 @@ pub fn main() !void {
                     if (key_pressed == rl.KEY_CAPS_LOCK) {
                         mode = .normal;
                     } else if (key_pressed == rl.KEY_ENTER) { // Evaluate command buffer
-                        if (std.mem.eql(u8, command_points.items, "barrel-roll")) {
-                            target_rot = 360;
+                        const line_num = std.fmt.parseUnsigned(
+                            usize,
+                            command_points.items,
+                            10,
+                        ) catch null;
+                        if (line_num != null) {
+                            default_buffer.cursor_coords.row = line_num.? - 1;
+                            const cursor_p = rl.Vector2{
+                                .x = camera.target.x, // FIXME(caleb)
+                                .y = @as(f32, @floatFromInt(
+                                    default_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
+                                )),
+                            };
+                            if (cursor_p.y > (camera.target.y + @as(f32, @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize)))))) {
+                                target_p = rl.Vector2Subtract(cursor_p, .{ .x = 0, .y = @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize))) });
+                            }
+                        } else {
+                            if (std.mem.eql(u8, command_points.items, "barrel-roll")) {
+                                target_rot = 360;
+                            } else if (std.mem.eql(u8, command_points.items, "w")) {
+                                target_rot = 360;
+                            }
                         }
                         mode = .normal;
                     } else if (key_pressed == rl.KEY_BACKSPACE) {
@@ -681,13 +707,21 @@ pub fn main() !void {
                         );
                         const cursor_coords_point_index = pointIndexFromCoords(
                             &default_buffer.line_break_indices,
-                            default_buffer.selection_coords,
+                            default_buffer.cursor_coords,
                         );
-
+                        const start_row = @min(default_buffer.cursor_coords.row, default_buffer.selection_coords.row);
                         const start = @min(selection_coords_point_index, cursor_coords_point_index);
                         const end = @max(selection_coords_point_index, cursor_coords_point_index) + 1;
-                        for (0..end - start) |_|
+                        for (0..end - start) |_| {
                             _ = default_buffer.points.orderedRemove(start);
+                            // default_buffer.cursor_coords = cellCoordsLeft(
+                            //     &default_buffer.line_break_indices,
+                            //     default_buffer.cursor_coords.row,
+                            //     default_buffer.cursor_coords.col,
+                            // );
+                        }
+                        shiftLineBreakIndices(&default_buffer.line_break_indices, start_row, -@as(isize, @intCast(end - start)));
+
                         mode = .normal;
                     }
                 },
