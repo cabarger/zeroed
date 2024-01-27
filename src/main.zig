@@ -1,18 +1,14 @@
 //!
 //! main.zig
 //!
-//! Author: Caleb Barger
-//! Date: 11/17/2023
-//! Compiler: zig 0.11.0
+//! Caleb Barger
+//! 11/17/2023
+//! zig 0.11.0
 //!
 
-// Daily driver requirements:
-// - Nav / basic actions [ ]
-//     - Smart indents on line break [ ]
-//     - Scrolling (almost done?!) [ ]
-//         - Give scrolling to line number second pass [ ]
-// - Basic history [ ]
-//    - Registers??
+//- cabarger: Use this thing to build itself:
+// - Scrolling (almost done?!) [ ]
+//    - Give scrolling to line number second pass [ ]
 // - Command buffer
 //    - Draw command buffer
 //    - 'w' command
@@ -23,7 +19,13 @@
 // - Windows support
 //    - handle '\r'
 
-// TODO(caleb):
+//- cabarger: Approaching usable editor:
+// - Nav / basic actions [ ]
+//     - Smart indents on line break [ ]
+// - Basic history [ ]
+//    - Registers??
+
+//- cabarger: Eventually..
 // - Move off of raylib's key input
 
 const std = @import("std");
@@ -46,16 +48,104 @@ const BufferCoords = struct {
 };
 
 const Buffer = struct {
+    arena: heap.ArenaAllocator,
     selection_coords: BufferCoords,
     cursor_coords: BufferCoords,
     points: ArrayList(u8),
     line_break_indices: ArrayList(usize),
+    backed_by_file: bool,
+    file_path_buf: [256]u8,
+    file_path: []const u8,
+    modified: bool,
+    modified_time: usize,
+    available: bool, //- cabarger: Probably can infer this?
 };
 
-const shift_width = 4;
-const default_font_size = 25; // TODO(caleb): Ask for default font size???
+fn bufferInit(buffer: *Buffer) void {
+    buffer.arena = heap.ArenaAllocator.init(heap.page_allocator);
+    buffer.cursor_coords = .{
+        .row = 0,
+        .col = 0,
+    };
+    buffer.points = ArrayList(u8).init(buffer.arena.allocator());
+    buffer.line_break_indices = ArrayList(usize).init(buffer.arena.allocator());
+    buffer.selection_coords = .{
+        .row = 0,
+        .col = 0,
+    };
+    buffer.backed_by_file = false;
+    buffer.file_path_buf = undefined;
+    buffer.file_path = undefined;
+    buffer.modified = false;
+    buffer.modified_time = 0;
+    buffer.available = true;
+}
 
-/// From line break indices compute the corosponding point index from these cell coords.
+fn bufferReset(buffer: *Buffer) void {
+    buffer.backed_by_file = false;
+    buffer.file_path = undefined;
+    buffer.modified = false;
+    buffer.modified_time = 0;
+    buffer.cursor_coords = .{ .row = 0, .col = 0 };
+    buffer.selection_coords = .{ .row = 0, .col = 0 };
+    buffer.line_break_indices.clearRetainingCapacity();
+    buffer.points.clearRetainingCapacity();
+    buffer.available = true;
+}
+
+/// Assumes buffer is has been RESET
+fn bufferLoadFile(buffer: *Buffer, path: []const u8) !void {
+    if (!buffer.available)
+        unreachable;
+    var f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    var reader = f.reader();
+    while (reader.readByte() catch null) |byte|
+        try buffer.points.append(byte);
+
+    for (path, 0..) |path_byte, path_byte_index|
+        buffer.file_path_buf[path_byte_index] = path_byte;
+    buffer.file_path = buffer.file_path_buf[0..path.len];
+    buffer.backed_by_file = true;
+}
+
+fn buffersGetAvail(buffers: []Buffer) ?*Buffer {
+    for (buffers) |*buffer| {
+        if (buffer.available) {
+            return buffer;
+        }
+    }
+    return null;
+}
+
+fn buffersReleaseColdest(buffers: []Buffer) !*Buffer {
+    var coldest_buffer: *Buffer = undefined;
+    {
+        var coldest_buffer_index: usize = 0;
+        for (buffers, 0..) |*buffer, buffer_index| {
+            if (buffer.modified_time < buffers[coldest_buffer_index].modified_time) {
+                coldest_buffer_index = buffer_index;
+            }
+        }
+        coldest_buffer = &buffers[coldest_buffer_index];
+    }
+    if (coldest_buffer.backed_by_file) {
+        var f = try std.fs.cwd().createFile(coldest_buffer.file_path, .{});
+        defer f.close();
+        var writer = f.writer();
+        for (coldest_buffer.points.items) |point| {
+            const point_u32: u32 = @intCast(point);
+            try writer.writeByte(@truncate(point_u32));
+        }
+    }
+    bufferReset(coldest_buffer);
+    return coldest_buffer;
+}
+
+const shift_width = 4;
+const default_font_size = 25;
+
+/// From line break indices get a point index from these cell coords.
 fn pointIndexFromCoords(
     line_break_indices: *ArrayList(usize),
     coords: BufferCoords,
@@ -243,18 +333,13 @@ pub fn main() !void {
     var fba_bytes = try heap.page_allocator.alloc(u8, 1024 * 1024); // 1mb
     var fba = heap.FixedBufferAllocator.init(fba_bytes);
 
-    var buffer_arena =
-        heap.ArenaAllocator.init(fba.allocator());
     var scratch_arena =
         heap.ArenaAllocator.init(fba.allocator());
-    var perm_arena =
-        heap.ArenaAllocator.init(fba.allocator());
-    _ = perm_arena;
 
     rl.InitWindow(@intCast(screen_width), @intCast(screen_height), "Zeroed");
     rl.SetConfigFlags(rl.FLAG_MSAA_4X_HINT);
     rl.SetWindowState(rl.FLAG_WINDOW_HIGHDPI | rl.FLAG_WINDOW_RESIZABLE);
-    rl.SetTargetFPS(60);
+    rl.SetTargetFPS(120);
 
     var font_size: c_int = default_font_size;
     var font: rl.Font = rl.LoadFontEx("FiraCode-Regular.ttf", font_size, null, 0);
@@ -265,28 +350,16 @@ pub fn main() !void {
 
     var mode: Mode = .normal;
 
-    var active_buffer = Buffer{
-        .cursor_coords = .{
-            .row = 0,
-            .col = 0,
-        },
-        .points = ArrayList(u8).init(buffer_arena.allocator()),
-        .line_break_indices = ArrayList(usize).init(buffer_arena.allocator()),
-        .selection_coords = .{
-            .row = 0,
-            .col = 0,
-        },
-    };
+    var buffers: [2]Buffer = undefined;
+    for (&buffers) |*buffer|
+        bufferInit(buffer);
+    var active_buffer = buffersGetAvail(&buffers) orelse unreachable;
 
     var command_points_index: usize = 0;
     var command_points = ArrayList(u8).init(scratch_arena.allocator());
 
-    // NOTE(caleb): DEBUG... Load *.zig into default buffer.
-    var buildf = try std.fs.cwd().openFile("src/main.zig", .{});
-    var build_reader = buildf.reader();
-    while (build_reader.readByte() catch null) |byte|
-        try active_buffer.points.append(byte);
-    buildf.close();
+    //- cabarger: DEBUG... Load *.zig into default buffer.
+    try bufferLoadFile(active_buffer, "src/main.zig");
 
     sanatizePoints(
         &scratch_arena,
@@ -311,7 +384,9 @@ pub fn main() !void {
     var draw_debug_info = false;
     var DEBUG_glyphs_drawn_this_frame: usize = 0;
 
-    while (!rl.WindowShouldClose()) {
+    main_loop: while (true) { //- cabarger: main loop
+        if (rl.WindowShouldClose())
+            break;
         if (rl.IsWindowResized()) {
             screen_width = @intCast(rl.GetScreenWidth());
             screen_height = @intCast(rl.GetScreenHeight());
@@ -541,7 +616,7 @@ pub fn main() !void {
                             active_buffer.cursor_coords,
                         );
                         if (point_index != 0) {
-                            // NOTE(caleb): Can I/Should I couple point removals/insertions and line
+                            //- cabarger: Can I/Should I couple point removals/insertions and line
                             // break index updates???
                             const removed_point =
                                 active_buffer.points.orderedRemove(point_index - 1);
@@ -642,9 +717,23 @@ pub fn main() !void {
                             }
                         } else {
                             if (std.mem.eql(u8, command_points.items, "barrel-roll")) {
-                                target_rot = 360;
+                                target_rot = 360.0;
                             } else if (std.mem.eql(u8, command_points.items, "w")) {
-                                target_rot = 360;
+                                if (active_buffer.backed_by_file) {
+                                    var dumpf = try std.fs.cwd().createFile(active_buffer.file_path, .{});
+                                    var dump_writer = dumpf.writer();
+                                    for (active_buffer.points.items) |point| {
+                                        const point_u32: u32 = @intCast(point);
+                                        try dump_writer.writeByte(@truncate(point_u32));
+                                    }
+                                    dumpf.close();
+                                }
+                            } else if (std.mem.eql(u8, command_points.items, "o")) {
+                                var new_buffer = buffersGetAvail(&buffers) orelse buffersReleaseColdest(&buffers) catch unreachable;
+                                try bufferLoadFile(new_buffer, command_points.items);
+                                active_buffer = new_buffer;
+                            } else if (std.mem.eql(u8, command_points.items, "q")) {
+                                break :main_loop;
                             }
                         }
                         mode = .normal;
@@ -787,9 +876,7 @@ pub fn main() !void {
         DEBUG_glyphs_drawn_this_frame = 0;
 
         rl.BeginDrawing();
-
         rl.ClearBackground(rl.Color{ .r = 0, .g = 0, .b = 0, .a = 255 });
-
         rl.BeginMode2D(camera);
 
         // Draw buffer
@@ -1003,21 +1090,11 @@ pub fn main() !void {
             defer _ = temp_arena.reset(.free_all);
 
             const fpsz = try std.fmt.allocPrintZ(temp_arena.allocator(), "fps: {d}", .{rl.GetFPS()});
-            rl.DrawTextEx(font, fpsz, .{
-                .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * refrence_glyph_info.image.width, 4) * 3),
-                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8),
-            }, @floatFromInt(font.baseSize), 0, rl.RED);
-
             const glyph_draw_countz = try std.fmt.allocPrintZ(
                 temp_arena.allocator(),
                 "glyphs drawn: {d}",
                 .{DEBUG_glyphs_drawn_this_frame},
             );
-            rl.DrawTextEx(font, glyph_draw_countz, .{
-                .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * refrence_glyph_info.image.width, 4) * 3),
-                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8 + font.baseSize),
-            }, @floatFromInt(font.baseSize), 0, rl.RED);
-
             const point_indexz = try std.fmt.allocPrintZ(
                 temp_arena.allocator(),
                 "point index: {d}",
@@ -1026,24 +1103,14 @@ pub fn main() !void {
                     active_buffer.cursor_coords,
                 )},
             );
-            rl.DrawTextEx(font, point_indexz, .{
-                .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * refrence_glyph_info.image.width, 4) * 3),
-                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8 + font.baseSize * 2),
-            }, @floatFromInt(font.baseSize), 0, rl.RED);
-
             const cursor_coordsz = try std.fmt.allocPrintZ(
                 temp_arena.allocator(),
                 "cursor_p: ({d}, {d})",
                 .{
-                    active_buffer.cursor_coords.row,
                     active_buffer.cursor_coords.col,
+                    active_buffer.cursor_coords.row,
                 },
             );
-            rl.DrawTextEx(font, cursor_coordsz, .{
-                .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * refrence_glyph_info.image.width, 4) * 3),
-                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8 + font.baseSize * 3),
-            }, @floatFromInt(font.baseSize), 0, rl.RED);
-
             const mem_usedz = try std.fmt.allocPrintZ(
                 temp_arena.allocator(),
                 "mem: {d}/{d}KB",
@@ -1052,21 +1119,21 @@ pub fn main() !void {
                     @divExact(fba.buffer.len, 1024),
                 },
             );
-            rl.DrawTextEx(font, mem_usedz, .{
-                .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * refrence_glyph_info.image.width, 4) * 3),
-                .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8 + font.baseSize * 4),
-            }, @floatFromInt(font.baseSize), 0, rl.RED);
+            for (&[_][:0]const u8{
+                fpsz,
+                glyph_draw_countz,
+                point_indexz,
+                cursor_coordsz,
+                mem_usedz,
+            }, 0..) |textz, debug_text_index| {
+                rl.DrawTextEx(font, textz, .{
+                    .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * refrence_glyph_info.image.width, 4) * 3),
+                    .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8 + font.baseSize * @as(c_int, @intCast(debug_text_index))),
+                }, @floatFromInt(font.baseSize), 0, rl.RED);
+            }
         }
         rl.EndDrawing();
     }
-
-    var dumpf = try std.fs.cwd().createFile("delme.cpp", .{});
-    var dump_writer = dumpf.writer();
-    for (active_buffer.points.items) |point| {
-        const point_u32: u32 = @intCast(point);
-        try dump_writer.writeByte(@truncate(point_u32));
-    }
-    dumpf.close();
 
     rl.CloseWindow();
 }
