@@ -10,13 +10,40 @@
 
 const std = @import("std");
 
-const ArenaAllocator = std.heap.ArenaAllocator;
+const heap = std.heap;
 
-pub const ThreadContext = struct {
-    arenas: [2]*ArenaAllocator,
+pub threadlocal var tctx_thread_local: *TCTX = undefined;
+
+pub const TCTX = struct {
+    arenas: [2]heap.ArenaAllocator,
 };
 
-tctxInitAndEquip(ThreadContext* tctx) {
-    var arenas: []*ArenaAllocator = &tctx.arenas;
-    
+pub fn tctxInitAndEquip(tctx: *TCTX) void {
+    for (&tctx.arenas) |*arena|
+        arena.* = heap.ArenaAllocator.init(heap.page_allocator);
+    tctx_thread_local = tctx;
+}
+
+pub inline fn tctxGetEquipped() *TCTX {
+    return tctx_thread_local;
+}
+
+pub fn tctxGetScratch(conflicts: ?[*]heap.ArenaAllocator, count: usize) ?*heap.ArenaAllocator {
+    var tctx = tctxGetEquipped();
+
+    var result: ?*heap.ArenaAllocator = null;
+    for (&tctx.arenas) |*arena_ptr| {
+        var has_conflict: bool = false;
+        for (0..count) |conflict_arena_index| {
+            if (arena_ptr == &conflicts.?[conflict_arena_index]) {
+                has_conflict = true;
+                break;
+            }
+        }
+        if (!has_conflict) {
+            result = arena_ptr;
+            break;
+        }
+    }
+    return result;
 }
