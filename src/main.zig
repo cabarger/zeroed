@@ -98,17 +98,14 @@ fn bufferReset(buffer: *Buffer) void {
 fn bufferLoadFile(buffer: *Buffer, scratch_arena: *heap.ArenaAllocator, path: []const u8) !void {
     if (!buffer.active)
         unreachable;
-    var f = try std.fs.cwd().openFile(path, .{});
+    var f = try std.fs.cwd().createFile(path, .{ .truncate = false, .read = true });
     defer f.close();
     var reader = f.reader();
-    while (reader.readByte() catch null) |byte|
+    while (reader.readByte() catch null) |byte| {
         try buffer.points.append(byte);
+    }
 
     removeCR(
-        scratch_arena,
-        &buffer.points,
-    );
-    replaceTabsWithSpaces(
         scratch_arena,
         &buffer.points,
     );
@@ -187,9 +184,12 @@ fn lineLenFromRow(
     line_break_indices: *ArrayList(usize),
     row: usize,
 ) usize {
-    var result: usize = line_break_indices.items[row] + 1;
-    if (row > 0)
-        result -= line_break_indices.items[row - 1] + 1;
+    var result: usize = 0;
+    if (line_break_indices.items.len > 0) {
+        result = line_break_indices.items[row] + 1;
+        if (row > 0)
+            result -= line_break_indices.items[row - 1] + 1;
+    }
     return result;
 }
 
@@ -199,7 +199,7 @@ inline fn cellCoordsRight(
     col: usize,
 ) BufferCoords {
     var result = BufferCoords{ .row = row, .col = col };
-    if (col == lineLenFromRow(line_break_indices, row) - 1) {
+    if (col == @max(1, lineLenFromRow(line_break_indices, row)) - 1) {
         if (row + 1 < line_break_indices.items.len) {
             result.col = 0;
             result.row += 1;
@@ -350,23 +350,6 @@ fn removeCR(scratch_arena: *std.heap.ArenaAllocator, points: *ArrayList(u8)) voi
     for (cr_indices_list.items, 0..) |cr_index, crs_removed| {
         _ = points.orderedRemove(cr_index - crs_removed);
     }
-}
-
-fn replaceTabsWithSpaces(scratch_arena: *std.heap.ArenaAllocator, points: *ArrayList(u8)) void {
-    _ = scratch_arena;
-    _ = points;
-    // var temp_arena = heap.ArenaAllocator.init(scratch_arena.allocator());
-    // defer _ = temp_arena.reset(.free_all);
-
-    // var tab_indices_list = ArrayList(usize).init(temp_arena.allocator());
-    // for (points.items, 0..) |point, point_index| {
-    //     if (point == '\t')
-    //         tab_indices_list.append(point_index) catch unreachable;
-    // }
-    // for (tab_indices_list.items, 0..) |tab_index| {
-    //     _ = points.orderedRemove(tab_index);
-    //     indentPoints(points, tab_index);
-    // }
 }
 
 const base_thread_context = @import("base_thread_context.zig");
@@ -822,6 +805,22 @@ pub fn main() !void {
                                         }
                                     }
                                     active_buffer = next_active_buffer orelse unreachable;
+                                } else if (mem.eql(u8, command_buffer_first, "bp")) {
+                                    var next_active_buffer: ?*Buffer = null;
+                                    {
+                                        var buffer_index: usize = 0;
+                                        for (&buffers) |*buffer| {
+                                            if (buffer == active_buffer)
+                                                break;
+                                            buffer_index += 1;
+                                        }
+                                        while (next_active_buffer == null) {
+                                            buffer_index = @intCast(@mod(@as(isize, @intCast(buffer_index)) - 1, buffers.len));
+                                            if (buffers[buffer_index].active)
+                                                next_active_buffer = &buffers[buffer_index];
+                                        }
+                                    }
+                                    active_buffer = next_active_buffer orelse unreachable;
                                 }
                             }
                             mode = .normal;
@@ -970,7 +969,7 @@ pub fn main() !void {
         // Draw buffer
         {
             const start_camera_row: usize = @min(
-                active_buffer.line_break_indices.items.len - 1,
+                @max(1, active_buffer.line_break_indices.items.len) - 1,
                 @as(usize, @intFromFloat(@divExact(
                     @max(0.0, @round(camera.target.y)),
                     @as(f32, @floatFromInt(font.baseSize)),
@@ -990,7 +989,6 @@ pub fn main() !void {
                     "{d: >4}",
                     .{row_index + 1},
                 );
-
                 for (line_number_str) |digit_char| {
                     rl.DrawTextCodepoint(
                         font,
