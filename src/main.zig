@@ -7,6 +7,7 @@
 //!
 
 //- cabarger: Use this thing to build itself:
+// - "Data loss very bad" now you say "data loss very bad." [ ]
 // - Scrolling (almost done?!) [ ]
 //    - Give scrolling to line number second pass [ ]
 // - Command buffer
@@ -94,7 +95,7 @@ fn bufferReset(buffer: *Buffer) void {
 }
 
 /// Assumes buffer is has been RESET
-fn bufferLoadFile(buffer: *Buffer, path: []const u8) !void {
+fn bufferLoadFile(buffer: *Buffer, scratch_arena: *heap.ArenaAllocator, path: []const u8) !void {
     if (!buffer.available)
         unreachable;
     var f = try std.fs.cwd().openFile(path, .{});
@@ -103,10 +104,21 @@ fn bufferLoadFile(buffer: *Buffer, path: []const u8) !void {
     while (reader.readByte() catch null) |byte|
         try buffer.points.append(byte);
 
+    replaceTabsWithSpaces(
+        scratch_arena,
+        &buffer.points,
+    );
+
+    // Compute line indices
+    for (buffer.points.items, 0..) |point, point_index|
+        if (point == '\n')
+            buffer.line_break_indices.append(point_index) catch unreachable;
+
     for (path, 0..) |path_byte, path_byte_index|
         buffer.file_path_buf[path_byte_index] = path_byte;
     buffer.file_path = buffer.file_path_buf[0..path.len];
     buffer.backed_by_file = true;
+    buffer.available = false;
 }
 
 fn buffersGetAvail(buffers: []Buffer) ?*Buffer {
@@ -311,7 +323,7 @@ inline fn indentPoints(points: *ArrayList(u8), point_index: usize) void {
         points.insert(point_index + shift_width_index, ' ') catch unreachable;
 }
 
-fn sanatizePoints(scratch_arena: *std.heap.ArenaAllocator, points: *ArrayList(u8)) void {
+fn replaceTabsWithSpaces(scratch_arena: *std.heap.ArenaAllocator, points: *ArrayList(u8)) void {
     var temp_arena = heap.ArenaAllocator.init(scratch_arena.allocator());
     defer _ = temp_arena.reset(.free_all);
 
@@ -359,17 +371,7 @@ pub fn main() !void {
     var command_points = ArrayList(u8).init(scratch_arena.allocator());
 
     //- cabarger: DEBUG... Load *.zig into default buffer.
-    try bufferLoadFile(active_buffer, "src/main.zig");
-
-    sanatizePoints(
-        &scratch_arena,
-        &active_buffer.points,
-    );
-
-    // Compute line indices
-    for (active_buffer.points.items, 0..) |point, point_index|
-        if (point == '\n')
-            active_buffer.line_break_indices.append(point_index) catch unreachable;
+    try bufferLoadFile(active_buffer, &scratch_arena, "src/main.zig");
 
     var last_char_pressed: u8 = 0;
 
