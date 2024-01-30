@@ -7,6 +7,7 @@
 //!
 
 //- cabarger: Use this thing to build itself:
+// - The empty file... [ ]
 // - "Data loss very bad" now you say "data loss very bad." [ ]
 // - Command buffer
 //    - Draw command buffer
@@ -567,6 +568,7 @@ pub fn main() !void {
                             if (active_buffer.points.items.len > 0) {
                                 const removed_point = active_buffer.points.orderedRemove(point_index);
                                 if (removed_point == '\n') {
+                                    //- cabarger: FIXME this doesn't handle the case whre the last line is being removed
                                     active_buffer.line_break_indices.items[active_buffer.cursor_coords.row] +=
                                         lineLenFromRow(&active_buffer.line_break_indices, active_buffer.cursor_coords.row + 1);
                                     _ = active_buffer.line_break_indices.orderedRemove(active_buffer.cursor_coords.row + 1);
@@ -618,6 +620,11 @@ pub fn main() !void {
                     },
                     .insert => {
                         if (char_pressed != 0) {
+                            //- cabarger: Edge case, empty buffer... also I hate this.
+                            if (active_buffer.line_break_indices.items.len == 0) {
+                                try active_buffer.line_break_indices.insert(0, 0);
+                                try active_buffer.points.insert(0, '\n');
+                            }
                             const point_index = pointIndexFromCoords(
                                 &active_buffer.line_break_indices,
                                 active_buffer.cursor_coords,
@@ -674,6 +681,12 @@ pub fn main() !void {
                                 );
                             }
                         } else if (key_pressed == rl.KEY_ENTER) {
+                            //- cabarger: Edge case, empty buffer... also I hate this.
+                            if (active_buffer.line_break_indices.items.len == 0) {
+                                try active_buffer.line_break_indices.insert(0, 0);
+                                try active_buffer.points.insert(0, '\n');
+                            }
+
                             // Where is this in the points buffer
                             const point_index = pointIndexFromCoords(
                                 &active_buffer.line_break_indices,
