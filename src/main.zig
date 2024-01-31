@@ -36,7 +36,8 @@ const heap = std.heap;
 const ArrayList = std.ArrayList;
 const SinglyLinkedList = std.SinglyLinkedList;
 
-const background_color = rl.Color{ .r = 20, .g = 20, .b = 20, .a = 255 };
+const background_color = rl.Color{ .r = 10, .g = 10, .b = 10, .a = 255 };
+const DEBUG_draw_nls = true;
 
 const Mode = enum {
     normal,
@@ -119,7 +120,7 @@ fn bufferReset(buffer: *Buffer) void {
 fn DEBUGPrintLine(line_node: *SinglyLinkedList(SinglyLinkedList(u8)).Node) void {
     var current_char_node = line_node.data.first;
     while (current_char_node != null) : (current_char_node = current_char_node.?.next) {
-        std.debug.print("{c}", .{current_char_node.?.data});
+        std.debug.print("{c}", .{(current_char_node orelse unreachable).data});
     }
     std.debug.print("\n", .{});
 }
@@ -156,12 +157,14 @@ fn bufferLoadFile(buffer: *Buffer, scratch_arena: *heap.ArenaAllocator, path: []
                 char_list = SinglyLinkedList(u8){};
             }
         }
-        var line_node = try buffer.line_nodes_pool.create();
-        line_node.data = char_list;
-        if (buffer.lines.first == null) {
-            buffer.lines.first = line_node;
-        } else {
-            buffer.lines.first.?.findLast().insertAfter(line_node);
+        if (char_list.first != null) {
+            var line_node = try buffer.line_nodes_pool.create();
+            line_node.data = char_list;
+            if (buffer.lines.first == null) {
+                buffer.lines.first = line_node;
+            } else {
+                buffer.lines.first.?.findLast().insertAfter(line_node);
+            }
         }
     }
 
@@ -169,11 +172,6 @@ fn bufferLoadFile(buffer: *Buffer, scratch_arena: *heap.ArenaAllocator, path: []
     //     scratch_arena,
     //     &buffer.points,
     // );
-
-    // Compute line indices
-    // for (buffer.points.items, 0..) |point, point_index|
-    //     if (point == '\n')
-    //         buffer.line_break_indices.append(point_index) catch unreachable;
 
     for (path, 0..) |path_byte, path_byte_index|
         buffer.file_path_buf[path_byte_index] = path_byte;
@@ -375,18 +373,20 @@ fn cellPFromCoords(
             line_index += 1;
         }
     }
-    var col_index: usize = 0;
-    var current_char_node = current_line.?.data.first;
-    while (current_char_node != null) : (current_char_node = current_char_node.?.next) {
-        if (col_index == coords.col)
-            break;
-        const point = current_char_node.?.data;
-        if (point == '\t') {
-            cursor_p.x += @floatFromInt(refrence_glyph_info.image.width * 4);
-        } else {
-            cursor_p.x += @floatFromInt(refrence_glyph_info.image.width);
+    if (current_line != null) {
+        var col_index: usize = 0;
+        var current_char_node = current_line.?.data.first;
+        while (current_char_node != null) : (current_char_node = current_char_node.?.next) {
+            if (col_index == coords.col)
+                break;
+            const point = current_char_node.?.data;
+            if (point == '\t') {
+                cursor_p.x += @floatFromInt(refrence_glyph_info.image.width * 4);
+            } else {
+                cursor_p.x += @floatFromInt(refrence_glyph_info.image.width);
+            }
+            col_index += 1;
         }
-        col_index += 1;
     }
     return cursor_p;
 }
@@ -442,9 +442,17 @@ fn startPointIndexFromCameraP(
     return point_index;
 }
 
-inline fn indentPoints(points: *ArrayList(u8), point_index: usize) void {
-    for (0..shift_width) |shift_width_index|
-        points.insert(point_index + shift_width_index, ' ') catch unreachable;
+inline fn indentChars(
+    char_nodes_pool: *heap.MemoryPool(SinglyLinkedList(u8).Node),
+    char_node_start: ?*SinglyLinkedList(u8).Node,
+) !void {
+    if (char_node_start != null) {
+        for (0..shift_width) |_| {
+            var char_node = try char_nodes_pool.create();
+            char_node.data = ' ';
+            char_node_start.?.insertAfter(char_node);
+        }
+    }
 }
 
 fn removeCR(scratch_arena: *std.heap.ArenaAllocator, points: *ArrayList(u8)) void {
@@ -497,7 +505,7 @@ pub fn main() !void {
     var command_points = ArrayList(u8).init(scratch_arena.allocator());
 
     //- cabarger: DEBUG... Load *.zig into default buffer.
-    try bufferLoadFile(active_buffer, scratch_arena, "delme.zig");
+    try bufferLoadFile(active_buffer, scratch_arena, "test_buffer.zig");
 
     var last_char_pressed: u8 = 0;
 
@@ -633,60 +641,68 @@ pub fn main() !void {
                             command_points.clearRetainingCapacity();
                             mode = .command;
                         } else if (char_pressed == '>') {
-                            const point_index = charNodeFromCoords(
+                            const line_node = lineNodeFromRow(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords,
-                            );
-                            const line_start = point_index - active_buffer.cursor_coords.col;
-                            indentPoints(&active_buffer.points, line_start);
-                            try shiftLBIndices(
-                                scratch_arena,
-                                &active_buffer.line_break_indices,
                                 active_buffer.cursor_coords.row,
-                                shift_width,
+                            ) orelse unreachable;
+                            try indentChars(
+                                &active_buffer.char_nodes_pool,
+                                line_node.data.first,
                             );
                         } else if (char_pressed == '<') {
-                            const point_index = charNodeFromCoords(
+                            const line_node = lineNodeFromRow(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords,
-                            );
-                            const line_start = point_index - active_buffer.cursor_coords.col;
+                                active_buffer.cursor_coords.row,
+                            ) orelse unreachable;
+
                             var white_space_count: usize = 0;
-                            for (active_buffer.points.items[line_start..]) |point| {
-                                if (point == ' ')
-                                    white_space_count += 1;
-                                if (white_space_count == shift_width or point != ' ')
-                                    break;
+                            {
+                                var current_char_node = line_node.data.first;
+                                while (current_char_node != null) : (current_char_node = current_char_node.?.next) {
+                                    const point = current_char_node.?.data;
+                                    if (point == ' ')
+                                        white_space_count += 1;
+                                    if (white_space_count == shift_width or point != ' ')
+                                        break;
+                                }
                             }
                             if (white_space_count > 0) {
                                 for (0..white_space_count) |_|
-                                    _ = active_buffer.points.orderedRemove(line_start);
-                                try shiftLBIndices(
-                                    scratch_arena,
-                                    &active_buffer.line_break_indices,
-                                    active_buffer.cursor_coords.row,
-                                    -@as(isize, @intCast(white_space_count)),
-                                );
+                                    _ = line_node.data.popFirst();
                             }
                         } else if (char_pressed == 'd') {
-                            const point_index = charNodeFromCoords(
+                            var removed_node: ?*SinglyLinkedList(u8).Node = undefined;
+                            var line_node = lineNodeFromRow(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords,
-                            );
-                            if (active_buffer.points.items.len > 0) {
-                                const removed_point = active_buffer.points.orderedRemove(point_index);
-                                if (removed_point == '\n') {
-                                    //- cabarger: FIXME this doesn't handle the case whre the last line is being removed
-                                    active_buffer.line_break_indices.items[active_buffer.cursor_coords.row] +=
-                                        lineLenFromRow(&active_buffer.line_break_indices, active_buffer.cursor_coords.row + 1);
-                                    _ = active_buffer.line_break_indices.orderedRemove(active_buffer.cursor_coords.row + 1);
+                                active_buffer.cursor_coords.row,
+                            ) orelse unreachable;
+                            var last_char_node: ?*SinglyLinkedList(u8).Node = null;
+                            var current_char_node = line_node.data.first;
+                            var current_char_index: usize = 0;
+                            while (current_char_node != null) : (current_char_node = current_char_node.?.next) {
+                                if (current_char_index == active_buffer.cursor_coords.col) {
+                                    if (last_char_node == null) {
+                                        removed_node = line_node.data.popFirst();
+                                    } else {
+                                        removed_node = last_char_node.?.removeNext();
+                                    }
+                                    if (removed_node != null) {
+                                        if (removed_node.?.data == '\n') {
+                                            // Take all the points from the next line and copy them here
+                                            const next_line_node = line_node.removeNext();
+                                            if (next_line_node != null) {
+                                                var char_node_parent = if (last_char_node != null) last_char_node else line_node.data.first orelse unreachable;
+                                                if (next_line_node.?.data.first != null)
+                                                    char_node_parent.?.insertAfter(next_line_node.?.data.first.?);
+                                                active_buffer.line_nodes_pool.destroy(next_line_node.?);
+                                            }
+                                        }
+                                        active_buffer.char_nodes_pool.destroy(removed_node.?);
+                                    }
+                                    break;
                                 }
-                                try shiftLBIndices(
-                                    scratch_arena,
-                                    &active_buffer.line_break_indices,
-                                    active_buffer.cursor_coords.row,
-                                    -1,
-                                );
+                                last_char_node = current_char_node;
+                                current_char_index += 1;
                             }
                         } else if (char_pressed == 'A') {
                             active_buffer.cursor_coords.col = lineLenFromRow(
@@ -700,16 +716,17 @@ pub fn main() !void {
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords,
                             );
+                            _ = point_index;
 
-                            if (point_index == active_buffer.points.items.len) {
-                                try active_buffer.points.insert(point_index, '\n');
-                                try shiftLBIndices(
-                                    scratch_arena,
-                                    &active_buffer.line_break_indices,
-                                    active_buffer.cursor_coords.row,
-                                    1,
-                                );
-                            }
+                            // if (point_index == active_buffer.points.items.len) {
+                            //     try active_buffer.points.insert(point_index, '\n');
+                            //     try shiftLBIndices(
+                            //         scratch_arena,
+                            //         &active_buffer.line_break_indices,
+                            //         active_buffer.cursor_coords.row,
+                            //         1,
+                            //     );
+                            // }
                             active_buffer.cursor_coords = cellCoordsRight(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
@@ -732,7 +749,8 @@ pub fn main() !void {
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords,
                             );
-                            try active_buffer.points.insert(point_index, char_pressed);
+                            _ = point_index;
+                            // try active_buffer.points.insert(point_index, char_pressed);
                             try shiftLBIndices(
                                 scratch_arena,
                                 &active_buffer.line_break_indices,
@@ -752,10 +770,11 @@ pub fn main() !void {
                         if (key_pressed == rl.KEY_CAPS_LOCK or key_pressed == rl.KEY_ESCAPE) {
                             mode = .normal;
                         } else if (key_pressed == rl.KEY_BACKSPACE) {
-                            const point_index = charNodeFromCoords(
-                                &active_buffer.lines,
-                                active_buffer.cursor_coords,
-                            );
+                            // const point_index = charNodeFromCoords(
+                            //     &active_buffer.lines,
+                            //     active_buffer.cursor_coords,
+                            // );
+                            const point_index = 0;
                             if (point_index != 0) {
                                 //- cabarger: Can I/Should I couple point removals/insertions and line
                                 // break index updates???
@@ -785,10 +804,11 @@ pub fn main() !void {
                             }
                         } else if (key_pressed == rl.KEY_ENTER) {
                             // Where is this in the points buffer
-                            const point_index = charNodeFromCoords(
-                                &active_buffer.lines,
-                                active_buffer.cursor_coords,
-                            );
+                            // const point_index = charNodeFromCoords(
+                            //     &active_buffer.lines,
+                            //     active_buffer.cursor_coords,
+                            // );
+                            const point_index = 0;
 
                             // Line length prior to newline insertion
                             const old_line_len =
@@ -822,16 +842,13 @@ pub fn main() !void {
                             // FIXME(caleb): If inserting at end of buffer a second newline should be added as well!
                             DEBUGPrintLineIndices(&active_buffer.line_break_indices, &active_buffer.points);
                         } else if (key_pressed == rl.KEY_TAB) {
-                            const point_index = charNodeFromCoords(
+                            const line_node = lineNodeFromRow(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords,
-                            );
-                            indentPoints(&active_buffer.points, point_index);
-                            try shiftLBIndices(
-                                scratch_arena,
-                                &active_buffer.line_break_indices,
                                 active_buffer.cursor_coords.row,
-                                shift_width,
+                            ) orelse unreachable;
+                            try indentChars(
+                                &active_buffer.char_nodes_pool,
+                                line_node.data.first,
                             );
                             active_buffer.cursor_coords.col += shift_width;
                         }
@@ -1003,14 +1020,16 @@ pub fn main() !void {
                                 active_buffer.cursor_coords.row,
                             ) - 1;
                         } else if (char_pressed == 'd') {
-                            const selection_coords_point_index = charNodeFromCoords(
-                                &active_buffer.lines,
-                                active_buffer.selection_coords,
-                            );
-                            const cursor_coords_point_index = charNodeFromCoords(
-                                &active_buffer.lines,
-                                active_buffer.cursor_coords,
-                            );
+                            // const selection_coords_point_index = charNodeFromCoords(
+                            //     &active_buffer.lines,
+                            //     active_buffer.selection_coords,
+                            // );
+                            const selection_coords_point_index = 0;
+                            // const cursor_coords_point_index = charNodeFromCoords(
+                            //     &active_buffer.lines,
+                            //     active_buffer.cursor_coords,
+                            // );
+                            const cursor_coords_point_index = 0;
 
                             var selection_start: BufferCoords = undefined;
                             var start_point_index: usize = undefined;
@@ -1134,6 +1153,19 @@ pub fn main() !void {
                 while (current_char_node != null) : (current_char_node = current_char_node.?.next) {
                     const point = current_char_node.?.data;
                     if (point == '\n') {
+                        if (DEBUG_draw_nls) {
+                            rl.DrawTextCodepoint(
+                                font,
+                                '$',
+                                .{
+                                    .x = @floatFromInt(x_offset),
+                                    .y = @floatFromInt(y_offset),
+                                },
+                                @floatFromInt(font.baseSize),
+                                rl.RED,
+                            );
+                            DEBUG_glyphs_drawn_this_frame += 1;
+                        }
                         y_offset += font.baseSize;
                         x_offset = refrence_glyph_info.image.width * 5;
                         continue;
@@ -1223,11 +1255,13 @@ pub fn main() !void {
 
         // Draw selection
         if (mode == .select) { // FIXME(caleb): Only draw selections that can be seen
-            const cursor_point = charNodeFromCoords(
-                &active_buffer.lines,
-                active_buffer.cursor_coords,
-            );
-            const selection_point = charNodeFromCoords(&active_buffer.lines, active_buffer.selection_coords);
+            // const cursor_point = charNodeFromCoords(
+            //     &active_buffer.lines,
+            //     active_buffer.cursor_coords,
+            // );
+            const cursor_point = 0;
+            // const selection_point = charNodeFromCoords(&active_buffer.lines, active_buffer.selection_coords);
+            const selection_point = 0;
             const start_point_index = @min(cursor_point, selection_point);
             const end_point_index = @max(cursor_point, selection_point);
 
@@ -1315,14 +1349,14 @@ pub fn main() !void {
                 "glyphs drawn: {d}",
                 .{DEBUG_glyphs_drawn_this_frame},
             );
-            const point_indexz = try std.fmt.allocPrintZ(
-                temp_arena.allocator(),
-                "point index: {d}",
-                .{charNodeFromCoords(
-                    &active_buffer.lines,
-                    active_buffer.cursor_coords,
-                )},
-            );
+            // const point_indexz = try std.fmt.allocPrintZ(
+            //     temp_arena.allocator(),
+            //     "point index: {d}",
+            //     .{charNodeFromCoords(
+            //         &active_buffer.lines,
+            //         active_buffer.cursor_coords,
+            //     ) orelse unreachable},
+            // );
             const cursor_coordsz = try std.fmt.allocPrintZ(
                 temp_arena.allocator(),
                 "cursor_p: ({d}, {d})",
@@ -1334,7 +1368,7 @@ pub fn main() !void {
             for (&[_][:0]const u8{
                 fpsz,
                 glyph_draw_countz,
-                point_indexz,
+                // point_indexz,
                 cursor_coordsz,
             }, 0..) |textz, debug_text_index| {
                 rl.DrawTextEx(font, textz, .{
