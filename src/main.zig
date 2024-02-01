@@ -60,8 +60,8 @@ const Buffer = struct {
     char_nodes_pool: heap.MemoryPool(SinglyLinkedList(u8).Node),
 
     lines: SinglyLinkedList(SinglyLinkedList(u8)),
-    line_break_indices: ArrayList(usize),
 
+    line_break_indices: ArrayList(usize), // DELME
     points: ArrayList(u8), // DELME
 
     backed_by_file: bool,
@@ -71,6 +71,7 @@ const Buffer = struct {
     /// Does this buffer need a write?
     needs_write: bool,
     modified_time: f64,
+
     active: bool, //- cabarger: Probably can infer this? Also rename this... Possibly loaded or open?
 };
 
@@ -106,6 +107,8 @@ fn bufferInit(buffer: *Buffer) void {
 }
 
 fn bufferReset(buffer: *Buffer) void {
+    buffer.line_nodes_pool.reset();
+    buffer.char_nodes_pool.reset();
     buffer.backed_by_file = false;
     buffer.file_path = undefined;
     buffer.needs_write = false;
@@ -114,7 +117,7 @@ fn bufferReset(buffer: *Buffer) void {
     buffer.selection_coords = .{ .row = 0, .col = 0 };
     buffer.line_break_indices.clearRetainingCapacity();
     buffer.points.clearRetainingCapacity();
-    buffer.active = true;
+    buffer.active = false;
 }
 
 fn DEBUGPrintLine(line_node: *SinglyLinkedList(SinglyLinkedList(u8)).Node) void {
@@ -125,15 +128,12 @@ fn DEBUGPrintLine(line_node: *SinglyLinkedList(SinglyLinkedList(u8)).Node) void 
     std.debug.print("\n", .{});
 }
 
-/// Assumes buffer is has been RESET
 fn bufferLoadFile(buffer: *Buffer, scratch_arena: *heap.ArenaAllocator, path: []const u8) !void {
+    bufferReset(buffer); //- cabarger: This is a waste for the initial buffer but whatever.
     _ = scratch_arena;
-    if (!buffer.active)
-        unreachable;
     var f = try std.fs.cwd().createFile(path, .{ .truncate = false, .read = true });
     defer f.close();
     var reader = f.reader();
-
     {
         var char_list = SinglyLinkedList(u8){};
         while (reader.readByte() catch null) |byte| {
@@ -177,6 +177,8 @@ fn bufferLoadFile(buffer: *Buffer, scratch_arena: *heap.ArenaAllocator, path: []
         buffer.file_path_buf[path_byte_index] = path_byte;
     buffer.file_path = buffer.file_path_buf[0..path.len];
     buffer.backed_by_file = true;
+
+    buffer.active = true; //- cabarger: I don't know where this should happen... Here is fine for now.
 }
 
 fn bufferWriteToDisk(buffer: *Buffer) !void {
@@ -211,14 +213,8 @@ fn buffersReleaseColdest(buffers: []Buffer) !*Buffer {
         }
         coldest_buffer = &buffers[coldest_buffer_index];
     }
-    if (coldest_buffer.backed_by_file) {
-        var f = try std.fs.cwd().createFile(coldest_buffer.file_path, .{});
-        defer f.close();
-        var writer = f.writer();
-        for (coldest_buffer.points.items) |point| {
-            const point_u32: u32 = @intCast(point);
-            try writer.writeByte(@truncate(point_u32));
-        }
+    if (coldest_buffer.backed_by_file) { //- cabarger: Possible data loss here.
+        try bufferWriteToDisk(coldest_buffer);
     }
     bufferReset(coldest_buffer);
     return coldest_buffer;
@@ -496,6 +492,7 @@ pub fn main() !void {
 
     var mode: Mode = .normal;
 
+    //- cabarger: Store buffers out of band. Active/Inactive
     var buffers: [2]Buffer = undefined;
     for (&buffers) |*buffer|
         bufferInit(buffer);
@@ -691,10 +688,15 @@ pub fn main() !void {
                                             // Take all the points from the next line and copy them here
                                             const next_line_node = line_node.removeNext();
                                             if (next_line_node != null) {
-                                                var char_node_parent = if (last_char_node != null) last_char_node else line_node.data.first orelse unreachable;
-                                                if (next_line_node.?.data.first != null)
-                                                    char_node_parent.?.insertAfter(next_line_node.?.data.first.?);
-                                                active_buffer.line_nodes_pool.destroy(next_line_node.?);
+                                                var char_node_parent = if (last_char_node != null) last_char_node else line_node.data.first;
+                                                if (char_node_parent != null) {
+                                                    if (next_line_node.?.data.first != null) {
+                                                        char_node_parent.?.insertAfter(next_line_node.?.data.first.?);
+                                                        std.debug.print("{c}\n", .{char_node_parent.?.data});
+                                                        unreachable;
+                                                    }
+                                                    active_buffer.line_nodes_pool.destroy(next_line_node.?);
+                                                } else {}
                                             }
                                         }
                                         active_buffer.char_nodes_pool.destroy(removed_node.?);
@@ -1349,14 +1351,6 @@ pub fn main() !void {
                 "glyphs drawn: {d}",
                 .{DEBUG_glyphs_drawn_this_frame},
             );
-            // const point_indexz = try std.fmt.allocPrintZ(
-            //     temp_arena.allocator(),
-            //     "point index: {d}",
-            //     .{charNodeFromCoords(
-            //         &active_buffer.lines,
-            //         active_buffer.cursor_coords,
-            //     ) orelse unreachable},
-            // );
             const cursor_coordsz = try std.fmt.allocPrintZ(
                 temp_arena.allocator(),
                 "cursor_p: ({d}, {d})",
@@ -1365,11 +1359,18 @@ pub fn main() !void {
                     active_buffer.cursor_coords.row,
                 },
             );
+            const line_node_countz = try std.fmt.allocPrintZ(
+                temp_arena.allocator(),
+                "lines: {d}",
+                .{
+                    active_buffer.lines.len(),
+                },
+            );
             for (&[_][:0]const u8{
                 fpsz,
                 glyph_draw_countz,
-                // point_indexz,
                 cursor_coordsz,
+                line_node_countz,
             }, 0..) |textz, debug_text_index| {
                 rl.DrawTextEx(font, textz, .{
                     .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * refrence_glyph_info.image.width, 4) * 3),
