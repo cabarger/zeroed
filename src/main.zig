@@ -214,34 +214,31 @@ const default_font_size = 25;
 fn charNodeFromLineAndCoords(
     line_node: *TailQueue(TailQueue(u8)).Node,
     coords: BufferCoords,
-) ?*TailQueue(u8).Node {
+) *TailQueue(u8).Node {
     var result: ?*TailQueue(u8).Node = null;
     result = line_node.data.first;
     var char_node_index: usize = 0;
     while (result != null) : (result = result.?.next) {
         if (char_node_index == coords.col)
-            break;
+            return result.?;
         char_node_index += 1;
     }
-    return result;
+    unreachable;
 }
 
 fn charNodeFromCoords(
     lines: *TailQueue(TailQueue(u8)),
     coords: BufferCoords,
-) ?*TailQueue(u8).Node {
-    var result: ?*TailQueue(u8).Node = null;
+) *TailQueue(u8).Node {
     var current_line = lineNodeFromRow(lines, coords.row);
-    if (current_line != null) {
-        result = current_line.?.data.first;
-        var char_node_index: usize = 0;
-        while (result != null) : (result = result.?.next) {
-            if (char_node_index == coords.col)
-                break;
-            char_node_index += 1;
-        }
+    var result = current_line.data.first;
+    var char_node_index: usize = 0;
+    while (result != null) : (result = result.?.next) {
+        if (char_node_index == coords.col)
+            return result.?;
+        char_node_index += 1;
     }
-    return result;
+    unreachable;
 }
 
 fn lineLenFromRow(
@@ -260,17 +257,15 @@ fn lineLenFromRow(
 inline fn lineNodeFromRow(
     lines: *TailQueue(TailQueue(u8)),
     row: usize,
-) ?*TailQueue(TailQueue(u8)).Node {
-    var current_line = lines.first;
-    {
-        var line_index: usize = 0;
-        while (current_line != null) : (current_line = current_line.?.next) {
-            if (line_index == row)
-                break;
-            line_index += 1;
-        }
+) *TailQueue(TailQueue(u8)).Node {
+    var result = lines.first;
+    var line_index: usize = 0;
+    while (result != null) : (result = result.?.next) {
+        if (line_index == row)
+            return result.?;
+        line_index += 1;
     }
-    return current_line;
+    unreachable;
 }
 
 inline fn cellCoordsRight(
@@ -279,17 +274,14 @@ inline fn cellCoordsRight(
     col: usize,
 ) BufferCoords {
     var result = BufferCoords{ .row = row, .col = col };
-    var current_line = lineNodeFromRow(lines, row);
-    if (current_line != null) {
-        const line_len = current_line.?.data.len;
-        if (col == @max(1, line_len) - 1) {
-            if (row + 1 < line_len) {
-                result.col = 0;
-                result.row += 1;
-            }
-        } else {
-            result.col += 1;
+    var current_line_node = lineNodeFromRow(lines, row);
+    if (col == current_line_node.data.len - 1) {
+        if (current_line_node.next != null) {
+            result.col = 0;
+            result.row += 1;
         }
+    } else {
+        result.col += 1;
     }
     return result;
 }
@@ -300,17 +292,14 @@ inline fn cellCoordsLeft(
     col: usize,
 ) BufferCoords {
     var result = BufferCoords{ .row = row, .col = col };
-    var current_line = lineNodeFromRow(lines, row);
-    if (current_line != null) {
-        if (col == 0) {
-            if (row > 0) {
-                var prior_line = lineNodeFromRow(lines, row - 1) orelse unreachable;
-                result.col = prior_line.data.len - 1;
-                result.row -= 1;
-            }
-        } else {
-            result.col -= 1;
+    var current_line_node = lineNodeFromRow(lines, row);
+    if (col == 0) {
+        if (current_line_node.prev != null) {
+            result.col = current_line_node.prev.?.data.len - 1;
+            result.row -= 1;
         }
+    } else {
+        result.col -= 1;
     }
     return result;
 }
@@ -321,15 +310,12 @@ inline fn cellCoordsUp(
     col: usize,
 ) BufferCoords {
     var result = BufferCoords{ .row = row, .col = col };
-    var current_line = lineNodeFromRow(lines, row);
-    if (current_line != null) {
-        if (row > 0) {
-            var prior_line = lineNodeFromRow(lines, row - 1) orelse unreachable;
-            const prior_line_len = prior_line.data.len;
-            if (prior_line_len < col)
-                result.col = prior_line_len;
-            result.row -= 1;
-        }
+    var current_line_node = lineNodeFromRow(lines, row);
+    if (current_line_node.prev != null) {
+        const prior_line_len = current_line_node.prev.?.data.len;
+        if (prior_line_len <= col)
+            result.col = prior_line_len - 1;
+        result.row -= 1;
     }
     return result;
 }
@@ -341,14 +327,11 @@ inline fn cellCoordsDown(
 ) BufferCoords {
     var result = BufferCoords{ .row = row, .col = col };
     var current_line = lineNodeFromRow(lines, row);
-    if (current_line != null) {
-        if (row + 1 < lines.len) {
-            var next_line = current_line.?.next orelse unreachable;
-            const next_line_len = next_line.data.len;
-            if (next_line_len < col)
-                result.col = next_line_len;
-            result.row += 1;
-        }
+    if (current_line.next != null) {
+        const next_line_len = current_line.next.?.data.len;
+        if (next_line_len <= col)
+            result.col = next_line_len - 1;
+        result.row += 1;
     }
     return result;
 }
@@ -645,7 +628,7 @@ pub fn main() !void {
                             const line_node = lineNodeFromRow(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
-                            ) orelse unreachable;
+                            );
                             try indentChars(
                                 &active_buffer.char_nodes_pool,
                                 &line_node.data,
@@ -655,7 +638,7 @@ pub fn main() !void {
                             const line_node = lineNodeFromRow(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
-                            ) orelse unreachable;
+                            );
 
                             var white_space_count: usize = 0;
                             {
@@ -673,22 +656,45 @@ pub fn main() !void {
                                     _ = line_node.data.popFirst();
                             }
                         } else if (char_pressed == 'd') {
-                            // Remove the current char
-                            // Get current row
 
-                            var line_node = lineNodeFromRow(
+                            //- cabarger: Get the current line
+                            var current_line_node = lineNodeFromRow(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
                             );
-                            if (line_node != null) {
-                                const char_node = charNodeFromLineAndCoords(
-                                    line_node.?,
-                                    active_buffer.cursor_coords,
-                                );
-                                if (char_node != null) {
-                                    line_node.?.data.remove(char_node.?);
-                                    active_buffer.char_nodes_pool.destroy(char_node.?);
+
+                            //- cabarger: Character node from cursor and line
+                            const char_node = charNodeFromLineAndCoords(
+                                current_line_node,
+                                active_buffer.cursor_coords,
+                            );
+
+                            //- cabarger: Do stuff because we are removing a new line
+                            if (char_node.data == '\n') {
+                                //- cabarger: Attempt to get the next line
+                                var next_line_node = current_line_node.next;
+                                if (next_line_node != null) {
+
+                                    //- cabarger: Append next lines contents
+                                    // var next_line_char_node = next_line_node.?.data.first;
+                                    while (next_line_node.?.data.popFirst()) |next_line_char_node| {
+                                        current_line_node.data.append(next_line_char_node);
+                                    }
+
+                                    //- Remove the next line
+                                    active_buffer.lines.remove(next_line_node.?);
+                                    active_buffer.line_nodes_pool.destroy(next_line_node.?);
                                 }
+                            }
+
+                            //- cabarger: Remove the char
+                            current_line_node.data.remove(char_node);
+                            active_buffer.char_nodes_pool.destroy(char_node);
+
+                            //- cabarger: Is this line empty?
+                            if (current_line_node.data.first == null) {
+                                active_buffer.lines.remove(current_line_node);
+                                active_buffer.line_nodes_pool.destroy(current_line_node);
                             }
 
                             // var removed_node: ?*TailQueue(u8).Node = undefined;
@@ -863,14 +869,11 @@ pub fn main() !void {
                                 active_buffer.cursor_coords.row,
                                 active_buffer.cursor_coords.col,
                             );
-
-                            // FIXME(caleb): If inserting at end of buffer a second newline should be added as well!
-                            DEBUGPrintLineIndices(&active_buffer.line_break_indices, &active_buffer.points);
                         } else if (key_pressed == rl.KEY_TAB) {
                             const line_node = lineNodeFromRow(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
-                            ) orelse unreachable;
+                            );
                             try indentChars(
                                 &active_buffer.char_nodes_pool,
                                 &line_node.data,
