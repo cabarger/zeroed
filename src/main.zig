@@ -34,7 +34,7 @@ const mem = std.mem;
 const heap = std.heap;
 
 const ArrayList = std.ArrayList;
-const SinglyLinkedList = std.SinglyLinkedList;
+const TailQueue = std.TailQueue;
 
 const background_color = rl.Color{ .r = 10, .g = 10, .b = 10, .a = 255 };
 const DEBUG_draw_nls = true;
@@ -56,10 +56,10 @@ const Buffer = struct {
     selection_coords: BufferCoords,
     cursor_coords: BufferCoords,
 
-    line_nodes_pool: heap.MemoryPool(SinglyLinkedList(SinglyLinkedList(u8)).Node),
-    char_nodes_pool: heap.MemoryPool(SinglyLinkedList(u8).Node),
+    line_nodes_pool: heap.MemoryPool(TailQueue(TailQueue(u8)).Node),
+    char_nodes_pool: heap.MemoryPool(TailQueue(u8).Node),
 
-    lines: SinglyLinkedList(SinglyLinkedList(u8)),
+    lines: TailQueue(TailQueue(u8)),
 
     line_break_indices: ArrayList(usize), // DELME
     points: ArrayList(u8), // DELME
@@ -79,11 +79,11 @@ fn bufferInit(buffer: *Buffer) void {
     buffer.arena = heap.ArenaAllocator.init(heap.page_allocator);
 
     buffer.line_nodes_pool =
-        heap.MemoryPool(SinglyLinkedList(SinglyLinkedList(u8)).Node)
+        heap.MemoryPool(TailQueue(TailQueue(u8)).Node)
         .init(buffer.arena.allocator());
 
     buffer.char_nodes_pool =
-        heap.MemoryPool(SinglyLinkedList(u8).Node)
+        heap.MemoryPool(TailQueue(u8).Node)
         .init(buffer.arena.allocator());
 
     buffer.lines = .{};
@@ -120,7 +120,7 @@ fn bufferReset(buffer: *Buffer) void {
     buffer.active = false;
 }
 
-fn DEBUGPrintLine(line_node: *SinglyLinkedList(SinglyLinkedList(u8)).Node) void {
+fn DEBUGPrintLine(line_node: *TailQueue(TailQueue(u8)).Node) void {
     var current_char_node = line_node.data.first;
     while (current_char_node != null) : (current_char_node = current_char_node.?.next) {
         std.debug.print("{c}", .{(current_char_node orelse unreachable).data});
@@ -135,36 +135,24 @@ fn bufferLoadFile(buffer: *Buffer, scratch_arena: *heap.ArenaAllocator, path: []
     defer f.close();
     var reader = f.reader();
     {
-        var char_list = SinglyLinkedList(u8){};
+        var char_list = TailQueue(u8){};
         while (reader.readByte() catch null) |byte| {
             var char_node = try buffer.char_nodes_pool.create();
             char_node.data = byte;
             char_node.next = null;
-            if (char_list.first == null) {
-                char_list.first = char_node;
-            } else {
-                char_list.first.?.findLast().insertAfter(char_node);
-            }
+            char_list.append(char_node);
             if (byte == '\n') {
                 var line_node = try buffer.line_nodes_pool.create();
                 line_node.data = char_list;
                 line_node.next = null;
-                if (buffer.lines.first == null) {
-                    buffer.lines.first = line_node;
-                } else {
-                    buffer.lines.first.?.findLast().insertAfter(line_node);
-                }
-                char_list = SinglyLinkedList(u8){};
+                buffer.lines.append(line_node);
+                char_list = TailQueue(u8){};
             }
         }
         if (char_list.first != null) {
             var line_node = try buffer.line_nodes_pool.create();
             line_node.data = char_list;
-            if (buffer.lines.first == null) {
-                buffer.lines.first = line_node;
-            } else {
-                buffer.lines.first.?.findLast().insertAfter(line_node);
-            }
+            buffer.lines.append(line_node);
         }
     }
 
@@ -223,11 +211,26 @@ fn buffersReleaseColdest(buffers: []Buffer) !*Buffer {
 const shift_width = 4;
 const default_font_size = 25;
 
-fn charNodeFromCoords(
-    lines: *SinglyLinkedList(SinglyLinkedList(u8)),
+fn charNodeFromLineAndCoords(
+    line_node: *TailQueue(TailQueue(u8)).Node,
     coords: BufferCoords,
-) ?*SinglyLinkedList(u8).Node {
-    var result: ?*SinglyLinkedList(u8).Node = null;
+) ?*TailQueue(u8).Node {
+    var result: ?*TailQueue(u8).Node = null;
+    result = line_node.data.first;
+    var char_node_index: usize = 0;
+    while (result != null) : (result = result.?.next) {
+        if (char_node_index == coords.col)
+            break;
+        char_node_index += 1;
+    }
+    return result;
+}
+
+fn charNodeFromCoords(
+    lines: *TailQueue(TailQueue(u8)),
+    coords: BufferCoords,
+) ?*TailQueue(u8).Node {
+    var result: ?*TailQueue(u8).Node = null;
     var current_line = lineNodeFromRow(lines, coords.row);
     if (current_line != null) {
         result = current_line.?.data.first;
@@ -255,9 +258,9 @@ fn lineLenFromRow(
 }
 
 inline fn lineNodeFromRow(
-    lines: *SinglyLinkedList(SinglyLinkedList(u8)),
+    lines: *TailQueue(TailQueue(u8)),
     row: usize,
-) ?*SinglyLinkedList(SinglyLinkedList(u8)).Node {
+) ?*TailQueue(TailQueue(u8)).Node {
     var current_line = lines.first;
     {
         var line_index: usize = 0;
@@ -271,14 +274,14 @@ inline fn lineNodeFromRow(
 }
 
 inline fn cellCoordsRight(
-    lines: *SinglyLinkedList(SinglyLinkedList(u8)),
+    lines: *TailQueue(TailQueue(u8)),
     row: usize,
     col: usize,
 ) BufferCoords {
     var result = BufferCoords{ .row = row, .col = col };
     var current_line = lineNodeFromRow(lines, row);
     if (current_line != null) {
-        const line_len = current_line.?.data.len();
+        const line_len = current_line.?.data.len;
         if (col == @max(1, line_len) - 1) {
             if (row + 1 < line_len) {
                 result.col = 0;
@@ -292,7 +295,7 @@ inline fn cellCoordsRight(
 }
 
 inline fn cellCoordsLeft(
-    lines: *SinglyLinkedList(SinglyLinkedList(u8)),
+    lines: *TailQueue(TailQueue(u8)),
     row: usize,
     col: usize,
 ) BufferCoords {
@@ -302,7 +305,7 @@ inline fn cellCoordsLeft(
         if (col == 0) {
             if (row > 0) {
                 var prior_line = lineNodeFromRow(lines, row - 1) orelse unreachable;
-                result.col = prior_line.data.len() - 1;
+                result.col = prior_line.data.len - 1;
                 result.row -= 1;
             }
         } else {
@@ -313,7 +316,7 @@ inline fn cellCoordsLeft(
 }
 
 inline fn cellCoordsUp(
-    lines: *SinglyLinkedList(SinglyLinkedList(u8)),
+    lines: *TailQueue(TailQueue(u8)),
     row: usize,
     col: usize,
 ) BufferCoords {
@@ -322,7 +325,7 @@ inline fn cellCoordsUp(
     if (current_line != null) {
         if (row > 0) {
             var prior_line = lineNodeFromRow(lines, row - 1) orelse unreachable;
-            const prior_line_len = prior_line.data.len();
+            const prior_line_len = prior_line.data.len;
             if (prior_line_len < col)
                 result.col = prior_line_len;
             result.row -= 1;
@@ -332,16 +335,16 @@ inline fn cellCoordsUp(
 }
 
 inline fn cellCoordsDown(
-    lines: *SinglyLinkedList(SinglyLinkedList(u8)),
+    lines: *TailQueue(TailQueue(u8)),
     row: usize,
     col: usize,
 ) BufferCoords {
     var result = BufferCoords{ .row = row, .col = col };
     var current_line = lineNodeFromRow(lines, row);
     if (current_line != null) {
-        if (row + 1 < lines.len()) {
+        if (row + 1 < lines.len) {
             var next_line = current_line.?.next orelse unreachable;
-            const next_line_len = next_line.data.len();
+            const next_line_len = next_line.data.len;
             if (next_line_len < col)
                 result.col = next_line_len;
             result.row += 1;
@@ -352,7 +355,7 @@ inline fn cellCoordsDown(
 
 fn cellPFromCoords(
     coords: BufferCoords,
-    lines: *SinglyLinkedList(SinglyLinkedList(u8)),
+    lines: *TailQueue(TailQueue(u8)),
     refrence_glyph_info: *const rl.GlyphInfo,
     font: *const rl.Font,
 ) rl.Vector2 {
@@ -439,14 +442,15 @@ fn startPointIndexFromCameraP(
 }
 
 inline fn indentChars(
-    char_nodes_pool: *heap.MemoryPool(SinglyLinkedList(u8).Node),
-    char_node_start: ?*SinglyLinkedList(u8).Node,
+    char_nodes_pool: *heap.MemoryPool(TailQueue(u8).Node),
+    char_node_list: *TailQueue(u8),
+    char_node_start: ?*TailQueue(u8).Node,
 ) !void {
     if (char_node_start != null) {
         for (0..shift_width) |_| {
             var char_node = try char_nodes_pool.create();
             char_node.data = ' ';
-            char_node_start.?.insertAfter(char_node);
+            char_node_list.insertAfter(char_node_start.?, char_node);
         }
     }
 }
@@ -644,6 +648,7 @@ pub fn main() !void {
                             ) orelse unreachable;
                             try indentChars(
                                 &active_buffer.char_nodes_pool,
+                                &line_node.data,
                                 line_node.data.first,
                             );
                         } else if (char_pressed == '<') {
@@ -668,44 +673,62 @@ pub fn main() !void {
                                     _ = line_node.data.popFirst();
                             }
                         } else if (char_pressed == 'd') {
-                            var removed_node: ?*SinglyLinkedList(u8).Node = undefined;
+                            // Remove the current char
+                            // Get current row
+
                             var line_node = lineNodeFromRow(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
-                            ) orelse unreachable;
-                            var last_char_node: ?*SinglyLinkedList(u8).Node = null;
-                            var current_char_node = line_node.data.first;
-                            var current_char_index: usize = 0;
-                            while (current_char_node != null) : (current_char_node = current_char_node.?.next) {
-                                if (current_char_index == active_buffer.cursor_coords.col) {
-                                    if (last_char_node == null) {
-                                        removed_node = line_node.data.popFirst();
-                                    } else {
-                                        removed_node = last_char_node.?.removeNext();
-                                    }
-                                    if (removed_node != null) {
-                                        if (removed_node.?.data == '\n') {
-                                            // Take all the points from the next line and copy them here
-                                            const next_line_node = line_node.removeNext();
-                                            if (next_line_node != null) {
-                                                var char_node_parent = if (last_char_node != null) last_char_node else line_node.data.first;
-                                                if (char_node_parent != null) {
-                                                    if (next_line_node.?.data.first != null) {
-                                                        char_node_parent.?.insertAfter(next_line_node.?.data.first.?);
-                                                        std.debug.print("{c}\n", .{char_node_parent.?.data});
-                                                        unreachable;
-                                                    }
-                                                    active_buffer.line_nodes_pool.destroy(next_line_node.?);
-                                                } else {}
-                                            }
-                                        }
-                                        active_buffer.char_nodes_pool.destroy(removed_node.?);
-                                    }
-                                    break;
+                            );
+                            if (line_node != null) {
+                                const char_node = charNodeFromLineAndCoords(
+                                    line_node.?,
+                                    active_buffer.cursor_coords,
+                                );
+                                if (char_node != null) {
+                                    line_node.?.data.remove(char_node.?);
+                                    active_buffer.char_nodes_pool.destroy(char_node.?);
                                 }
-                                last_char_node = current_char_node;
-                                current_char_index += 1;
                             }
+
+                            // var removed_node: ?*TailQueue(u8).Node = undefined;
+                            // var line_node = lineNodeFromRow(
+                            //     &active_buffer.lines,
+                            //     active_buffer.cursor_coords.row,
+                            // ) orelse unreachable;
+                            // var last_char_node: ?*TailQueue(u8).Node = null;
+                            // var current_char_node = line_node.data.first;
+                            // var current_char_index: usize = 0;
+                            // while (current_char_node != null) : (current_char_node = current_char_node.?.next) {
+                            //     if (current_char_index == active_buffer.cursor_coords.col) {
+                            //         if (last_char_node == null) {
+                            //             removed_node = line_node.data.popFirst();
+                            //         } else {
+                            //             removed_node = last_char_node.?.removeNext();
+                            //         }
+                            //         if (removed_node != null) {
+                            //             if (removed_node.?.data == '\n') {
+                            //                 // Take all the points from the next line and copy them here
+                            //                 const next_line_node = line_node.removeNext();
+                            //                 if (next_line_node != null) {
+                            //                     var char_node_parent = if (last_char_node != null) last_char_node else line_node.data.first;
+                            //                     if (char_node_parent != null) {
+                            //                         if (next_line_node.?.data.first != null) {
+                            //                             char_node_parent.?.insertAfter(next_line_node.?.data.first.?);
+                            //                             std.debug.print("{c}\n", .{char_node_parent.?.data});
+                            //                             unreachable;
+                            //                         }
+                            //                         active_buffer.line_nodes_pool.destroy(next_line_node.?);
+                            //                     } else {}
+                            //                 }
+                            //             }
+                            //             active_buffer.char_nodes_pool.destroy(removed_node.?);
+                            //         }
+                            //         break;
+                            //     }
+                            //     last_char_node = current_char_node;
+                            //     current_char_index += 1;
+                            // }
                         } else if (char_pressed == 'A') {
                             active_buffer.cursor_coords.col = lineLenFromRow(
                                 &active_buffer.line_break_indices,
@@ -850,6 +873,7 @@ pub fn main() !void {
                             ) orelse unreachable;
                             try indentChars(
                                 &active_buffer.char_nodes_pool,
+                                &line_node.data,
                                 line_node.data.first,
                             );
                             active_buffer.cursor_coords.col += shift_width;
@@ -1100,7 +1124,7 @@ pub fn main() !void {
         // Draw buffer
         {
             //- cabarger: I hate this
-            const active_buffer_line_count = active_buffer.lines.len();
+            const active_buffer_line_count = active_buffer.lines.len;
             const start_camera_row: usize = @min(
                 @max(1, active_buffer_line_count) - 1,
                 @as(usize, @intFromFloat(@divExact(
@@ -1363,7 +1387,7 @@ pub fn main() !void {
                 temp_arena.allocator(),
                 "lines: {d}",
                 .{
-                    active_buffer.lines.len(),
+                    active_buffer.lines.len,
                 },
             );
             for (&[_][:0]const u8{
