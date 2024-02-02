@@ -7,13 +7,9 @@
 //!
 
 //- cabarger: Use this thing to build itself:
-// - The empty file... [ ]
+// - Port what I already had working [ ]
 // - "Data loss very bad" now you say "data loss very bad." [ ]
-// - Command buffer
-//    - Draw command buffer
-//    - 'o' command
-//        - New buffer from file
-//    - Switch buffers
+// - The empty file... [ ]
 // - Windows support
 //    - handle '\r'
 
@@ -25,14 +21,17 @@
 // - Scrolling past start and end of text  [ ]
 
 //- cabarger: Eventually..
-// - Move off of raylib's key input
+// VSPLIT
+// - Move off of raylib
 
 const std = @import("std");
 const rl = @import("rl.zig");
+const base_thread_context = @import("base_thread_context.zig");
 
 const mem = std.mem;
 const heap = std.heap;
 
+const TCTX = base_thread_context.TCTX;
 const ArrayList = std.ArrayList;
 const TailQueue = std.TailQueue;
 
@@ -61,14 +60,10 @@ const Buffer = struct {
 
     lines: TailQueue(TailQueue(u8)),
 
-    line_break_indices: ArrayList(usize), // DELME
-    points: ArrayList(u8), // DELME
-
     backed_by_file: bool,
     file_path_buf: [256]u8,
     file_path: []const u8,
 
-    /// Does this buffer need a write?
     needs_write: bool,
     modified_time: f64,
 
@@ -92,8 +87,6 @@ fn bufferInit(buffer: *Buffer) void {
         .row = 0,
         .col = 0,
     };
-    buffer.points = ArrayList(u8).init(buffer.arena.allocator());
-    buffer.line_break_indices = ArrayList(usize).init(buffer.arena.allocator());
     buffer.selection_coords = .{
         .row = 0,
         .col = 0,
@@ -115,8 +108,6 @@ fn bufferReset(buffer: *Buffer) void {
     buffer.modified_time = 0.0;
     buffer.cursor_coords = .{ .row = 0, .col = 0 };
     buffer.selection_coords = .{ .row = 0, .col = 0 };
-    buffer.line_break_indices.clearRetainingCapacity();
-    buffer.points.clearRetainingCapacity();
     buffer.active = false;
 }
 
@@ -173,9 +164,11 @@ fn bufferWriteToDisk(buffer: *Buffer) !void {
     var f = try std.fs.cwd().createFile(buffer.file_path, .{});
     defer f.close();
     var writer = f.writer();
-    for (buffer.points.items) |point| {
-        const point_u32: u32 = @intCast(point);
-        try writer.writeByte(@truncate(point_u32));
+    var current_line_node = buffer.lines.first;
+    while (current_line_node != null) : (current_line_node = current_line_node.?.next) {
+        var current_char_node = current_line_node.?.data.first;
+        while (current_char_node != null) : (current_char_node = current_char_node.?.next)
+            try writer.writeByte(current_char_node.?.data);
     }
     buffer.needs_write = false;
 }
@@ -224,34 +217,6 @@ fn charNodeFromLineAndCoords(
         char_node_index += 1;
     }
     unreachable;
-}
-
-fn charNodeFromCoords(
-    lines: *TailQueue(TailQueue(u8)),
-    coords: BufferCoords,
-) *TailQueue(u8).Node {
-    var current_line = lineNodeFromRow(lines, coords.row);
-    var result = current_line.data.first;
-    var char_node_index: usize = 0;
-    while (result != null) : (result = result.?.next) {
-        if (char_node_index == coords.col)
-            return result.?;
-        char_node_index += 1;
-    }
-    unreachable;
-}
-
-fn lineLenFromRow(
-    line_break_indices: *ArrayList(usize),
-    row: usize,
-) usize {
-    var result: usize = 0;
-    if (line_break_indices.items.len > 0) {
-        result = line_break_indices.items[row] + 1;
-        if (row > 0)
-            result -= line_break_indices.items[row - 1] + 1;
-    }
-    return result;
 }
 
 inline fn lineNodeFromRow(
@@ -373,57 +338,6 @@ fn cellPFromCoords(
     return cursor_p;
 }
 
-fn shiftLBIndices(
-    scratch_arena: *heap.ArenaAllocator,
-    lb_indices: *ArrayList(usize),
-    start_row: usize,
-    shift_amount: isize,
-) !void {
-    _ = scratch_arena;
-
-    for (lb_indices.items[start_row..]) |*lb_index| {
-        const shifted_lb_index: isize =
-            @as(isize, @intCast(lb_index.*)) + shift_amount;
-        if (shifted_lb_index < 0)
-            unreachable;
-        lb_index.* = @intCast(shifted_lb_index);
-    }
-}
-
-fn DEBUGPrintLineIndices(line_break_indices: *ArrayList(usize), points: *ArrayList(u8)) void {
-    var last_nl_index: usize = 0;
-    for (line_break_indices.items, 0..) |nl_index, lbi_index| {
-        for (points.items[last_nl_index..nl_index]) |ch| {
-            const point_u32: u32 = @intCast(ch);
-            std.debug.print("{c}", .{@as(u8, @intCast(point_u32))});
-        }
-        std.debug.print(":{d}\n", .{nl_index});
-        last_nl_index = nl_index + 1;
-
-        if (lbi_index > 10)
-            break;
-    }
-}
-
-fn startPointIndexFromCameraP(
-    buffer_points: *const ArrayList(u8),
-    refrence_glyph_info: *const rl.GlyphInfo,
-    font: *const rl.Font,
-    camera_p: rl.Vector2,
-) usize {
-    _ = refrence_glyph_info;
-    var point_index: usize = 0;
-    const start_row: isize = @intFromFloat(@floor(camera_p.y / @as(f32, @floatFromInt(font.baseSize))));
-    var nl_count: usize = 0;
-    while (nl_count < start_row - 1 and
-        point_index < buffer_points.items.len) : (point_index += 1)
-    {
-        if (buffer_points.items[point_index] == '\n')
-            nl_count += 1;
-    }
-    return point_index;
-}
-
 inline fn indentChars(
     char_nodes_pool: *heap.MemoryPool(TailQueue(u8).Node),
     char_node_list: *TailQueue(u8),
@@ -452,9 +366,6 @@ fn removeCR(scratch_arena: *std.heap.ArenaAllocator, points: *ArrayList(u8)) voi
     }
 }
 
-const base_thread_context = @import("base_thread_context.zig");
-const TCTX = base_thread_context.TCTX;
-
 pub fn main() !void {
     var screen_width: usize = 800;
     var screen_height: usize = 600;
@@ -471,7 +382,7 @@ pub fn main() !void {
     rl.SetExitKey(0);
 
     var font_size: c_int = default_font_size;
-    var font: rl.Font = rl.LoadFontEx("ComicMono.ttf", font_size, null, 0);
+    var font: rl.Font = rl.LoadFontEx("FiraCode-Regular.ttf", font_size, null, 0);
     var refrence_glyph_info: rl.GlyphInfo = rl.GetGlyphInfo(font, ' ');
 
     var rows: usize = @divTrunc(screen_height, @as(usize, @intCast(font.baseSize)));
@@ -504,7 +415,7 @@ pub fn main() !void {
     var draw_debug_info = false;
     var DEBUG_glyphs_drawn_this_frame: usize = 0;
 
-    main_loop: while (true) { //- cabarger: main loop
+    main_loop: while (true) {
         if (rl.WindowShouldClose())
             break;
         if (rl.IsWindowResized()) {
@@ -525,7 +436,7 @@ pub fn main() !void {
             if (char_pressed > 127)
                 unreachable; // FIXME(caleb): utf-8 support
 
-            //- cabarger: Dosen't care about mode
+            //- cabarger: Mode agnostic input handling.
             if (key_pressed == rl.KEY_ENTER and alt_is_held) {
                 if (!rl.IsWindowMaximized()) rl.MaximizeWindow() else rl.RestoreWindow();
                 screen_width = @intCast(rl.GetScreenWidth());
@@ -535,23 +446,29 @@ pub fn main() !void {
             } else {
                 switch (mode) {
                     .normal => {
-                        if (key_pressed == rl.KEY_I) {
-                            mode = .insert;
-                        } else if (key_pressed == rl.KEY_MINUS) {
+
+                        //- cabarger: UI
+                        if (key_pressed == rl.KEY_MINUS) {
                             rl.UnloadFont(font);
                             font_size -= 1;
-                            font = rl.LoadFontEx("ComicMono.ttf", font_size, null, 0);
+                            font = rl.LoadFontEx("FiraCode-Regular.ttf", font_size, null, 0);
                             refrence_glyph_info = rl.GetGlyphInfo(font, ' ');
                             rows = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
                             cols = @divFloor(screen_width, @as(usize, @intCast(refrence_glyph_info.image.width)));
                         } else if (key_pressed == rl.KEY_EQUAL) {
                             rl.UnloadFont(font);
                             font_size += 1;
-                            font = rl.LoadFontEx("ComicMono.ttf", font_size, null, 0);
+                            font = rl.LoadFontEx("FiraCode-Regular.ttf", font_size, null, 0);
                             refrence_glyph_info = rl.GetGlyphInfo(font, ' ');
                             rows = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
                             cols = @divFloor(screen_width, @as(usize, @intCast(refrence_glyph_info.image.width)));
-                        } else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
+                        }
+
+                        ///////////////////////////////
+                        //- cabarger: Navigation
+
+                        //- cabarger: Move cursor up/down/left/right
+                        else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
                             active_buffer.cursor_coords = cellCoordsUp(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
@@ -593,7 +510,10 @@ pub fn main() !void {
                                 active_buffer.cursor_coords.row,
                                 active_buffer.cursor_coords.col,
                             );
-                        } else if (ctrl_is_held and key_pressed == rl.KEY_D) {
+                        }
+
+                        //- cabarger: Scroll buffer up/down by half a screen
+                        else if (ctrl_is_held and key_pressed == rl.KEY_D) {
                             target_p = rl.Vector2Add(target_p, .{
                                 .x = 0,
                                 .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2)))),
@@ -617,14 +537,85 @@ pub fn main() !void {
                                 );
                         }
 
+                        //- cabarger: Scroll buffer up/down by a screen
+                        else if (key_pressed == rl.KEY_PAGE_DOWN) {
+                            target_p = rl.Vector2Add(target_p, .{
+                                .x = 0,
+                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(rows))),
+                            });
+                            for (0..rows) |_|
+                                active_buffer.cursor_coords = cellCoordsDown(
+                                    &active_buffer.lines,
+                                    active_buffer.cursor_coords.row,
+                                    active_buffer.cursor_coords.col,
+                                );
+                        } else if (key_pressed == rl.KEY_PAGE_UP) {
+                            target_p = rl.Vector2Subtract(target_p, .{
+                                .x = 0,
+                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(rows))),
+                            });
+                            for (0..rows) |_|
+                                active_buffer.cursor_coords = cellCoordsUp(
+                                    &active_buffer.lines,
+                                    active_buffer.cursor_coords.row,
+                                    active_buffer.cursor_coords.col,
+                                );
+                        }
+
+                        ///////////////////////////////
+                        //- cabarger: Mode shifts / navigation ??
+
+                        //- cabarger: Enter insert mode
+                        else if (key_pressed == rl.KEY_I) {
+                            mode = .insert;
+                        }
+
+                        //- cabarger: Enter visual mode
                         if (char_pressed == 'v') {
                             active_buffer.selection_coords = active_buffer.cursor_coords;
                             mode = .select;
-                        } else if (char_pressed == ':') {
+                        }
+
+                        //- cabarger: Command mode? Is this a mode? Whatever.
+                        else if (char_pressed == ':') {
                             command_points_index = 0;
                             command_points.clearRetainingCapacity();
                             mode = .command;
-                        } else if (char_pressed == '>') {
+                        }
+
+                        //- cabarger: Move to end of line and enter insert mode
+                        else if (char_pressed == 'A') {
+                            mode = .insert;
+                        }
+
+                        //- cabarger: Advance right and enter insert mode
+                        else if (char_pressed == 'a') {
+                            // If inserting at end of buffer a second newline should be added as well!
+                            // const point_index = charNodeFromCoords(
+                            //     &active_buffer.lines,
+                            //     active_buffer.cursor_coords,
+                            // );
+                            // _ = point_index;
+
+                            active_buffer.cursor_coords = cellCoordsRight(
+                                &active_buffer.lines,
+                                active_buffer.cursor_coords.row,
+                                active_buffer.cursor_coords.col,
+                            );
+                            mode = .insert;
+                        }
+
+                        ///////////////////////////////
+                        //- cabarger: Edit dat buffer
+
+                        //- cabarger: Select entire line
+                        else if (char_pressed == 'x') {
+                            active_buffer.selection_coords.col = 0;
+                            active_buffer.selection_coords.row = active_buffer.cursor_coords.row;
+                        }
+
+                        //- cabarger: Indent left/right
+                        else if (char_pressed == '>') {
                             const line_node = lineNodeFromRow(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
@@ -655,7 +646,10 @@ pub fn main() !void {
                                 for (0..white_space_count) |_|
                                     _ = line_node.data.popFirst();
                             }
-                        } else if (char_pressed == 'd') {
+                        }
+
+                        //- cabarger: Remove the character under the cursor
+                        else if (char_pressed == 'd') {
 
                             //- cabarger: Get the current line
                             var current_line_node = lineNodeFromRow(
@@ -691,103 +685,20 @@ pub fn main() !void {
                             current_line_node.data.remove(char_node);
                             active_buffer.char_nodes_pool.destroy(char_node);
 
-                            //- cabarger: Is this line empty?
+                            //- cabarger: Is this line empty? If so remove it.
                             if (current_line_node.data.first == null) {
                                 active_buffer.lines.remove(current_line_node);
                                 active_buffer.line_nodes_pool.destroy(current_line_node);
                             }
-
-                            // var removed_node: ?*TailQueue(u8).Node = undefined;
-                            // var line_node = lineNodeFromRow(
-                            //     &active_buffer.lines,
-                            //     active_buffer.cursor_coords.row,
-                            // ) orelse unreachable;
-                            // var last_char_node: ?*TailQueue(u8).Node = null;
-                            // var current_char_node = line_node.data.first;
-                            // var current_char_index: usize = 0;
-                            // while (current_char_node != null) : (current_char_node = current_char_node.?.next) {
-                            //     if (current_char_index == active_buffer.cursor_coords.col) {
-                            //         if (last_char_node == null) {
-                            //             removed_node = line_node.data.popFirst();
-                            //         } else {
-                            //             removed_node = last_char_node.?.removeNext();
-                            //         }
-                            //         if (removed_node != null) {
-                            //             if (removed_node.?.data == '\n') {
-                            //                 // Take all the points from the next line and copy them here
-                            //                 const next_line_node = line_node.removeNext();
-                            //                 if (next_line_node != null) {
-                            //                     var char_node_parent = if (last_char_node != null) last_char_node else line_node.data.first;
-                            //                     if (char_node_parent != null) {
-                            //                         if (next_line_node.?.data.first != null) {
-                            //                             char_node_parent.?.insertAfter(next_line_node.?.data.first.?);
-                            //                             std.debug.print("{c}\n", .{char_node_parent.?.data});
-                            //                             unreachable;
-                            //                         }
-                            //                         active_buffer.line_nodes_pool.destroy(next_line_node.?);
-                            //                     } else {}
-                            //                 }
-                            //             }
-                            //             active_buffer.char_nodes_pool.destroy(removed_node.?);
-                            //         }
-                            //         break;
-                            //     }
-                            //     last_char_node = current_char_node;
-                            //     current_char_index += 1;
-                            // }
-                        } else if (char_pressed == 'A') {
-                            active_buffer.cursor_coords.col = lineLenFromRow(
-                                &active_buffer.line_break_indices,
-                                active_buffer.cursor_coords.row,
-                            ) - 1;
-                            mode = .insert;
-                        } else if (char_pressed == 'a') {
-                            // If inserting at end of buffer a second newline should be added as well!
-                            const point_index = charNodeFromCoords(
-                                &active_buffer.lines,
-                                active_buffer.cursor_coords,
-                            );
-                            _ = point_index;
-
-                            // if (point_index == active_buffer.points.items.len) {
-                            //     try active_buffer.points.insert(point_index, '\n');
-                            //     try shiftLBIndices(
-                            //         scratch_arena,
-                            //         &active_buffer.line_break_indices,
-                            //         active_buffer.cursor_coords.row,
-                            //         1,
-                            //     );
-                            // }
-                            active_buffer.cursor_coords = cellCoordsRight(
-                                &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
-                            );
-                            mode = .insert;
-                        } else if (char_pressed == 'x') {
-                            active_buffer.selection_coords.col = 0;
-                            active_buffer.selection_coords.row = active_buffer.cursor_coords.row;
-                            active_buffer.cursor_coords.col = lineLenFromRow(
-                                &active_buffer.line_break_indices,
-                                active_buffer.cursor_coords.row,
-                            ) - 1;
-                            mode = .select;
                         }
                     },
                     .insert => {
                         if (char_pressed != 0) {
-                            const point_index = charNodeFromCoords(
-                                &active_buffer.lines,
-                                active_buffer.cursor_coords,
-                            );
-                            _ = point_index;
-                            // try active_buffer.points.insert(point_index, char_pressed);
-                            try shiftLBIndices(
-                                scratch_arena,
-                                &active_buffer.line_break_indices,
-                                active_buffer.cursor_coords.row,
-                                1,
-                            );
+                            // const point_index = charNodeFromCoords(
+                            //     &active_buffer.lines,
+                            //     active_buffer.cursor_coords,
+                            // );
+                            // _ = point_index;
                             active_buffer.cursor_coords = cellCoordsRight(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
@@ -809,23 +720,8 @@ pub fn main() !void {
                             if (point_index != 0) {
                                 //- cabarger: Can I/Should I couple point removals/insertions and line
                                 // break index updates???
-                                const removed_point =
-                                    active_buffer.points.orderedRemove(point_index - 1);
-                                try shiftLBIndices(
-                                    scratch_arena,
-                                    &active_buffer.line_break_indices,
-                                    active_buffer.cursor_coords.row,
-                                    -1,
-                                );
+                                var removed_point: u8 = 0;
                                 if (removed_point == '\n') { // When hitting a newline
-                                    const nuked_line_len = lineLenFromRow( // Get remaining line len
-                                        &active_buffer.line_break_indices,
-                                        active_buffer.cursor_coords.row,
-                                    );
-                                    _ = active_buffer.line_break_indices.orderedRemove(
-                                        active_buffer.cursor_coords.row,
-                                    );
-                                    active_buffer.line_break_indices.items[active_buffer.cursor_coords.row - 1] += nuked_line_len;
                                 }
                                 active_buffer.cursor_coords = cellCoordsLeft(
                                     &active_buffer.lines,
@@ -840,29 +736,18 @@ pub fn main() !void {
                             //     active_buffer.cursor_coords,
                             // );
                             const point_index = 0;
+                            _ = point_index;
 
                             // Line length prior to newline insertion
-                            const old_line_len =
-                                lineLenFromRow(
-                                &active_buffer.line_break_indices,
-                                active_buffer.cursor_coords.row,
-                            );
+                            const old_line_len = 0;
 
                             // How much to increment line break indices
                             const increment_len = old_line_len - active_buffer.cursor_coords.col;
+                            _ = increment_len;
 
                             // Set current row to newline point index
-                            active_buffer.line_break_indices.items[active_buffer.cursor_coords.row] = point_index;
-                            try active_buffer.line_break_indices.insert(active_buffer.cursor_coords.row + 1, point_index + increment_len - 1);
-                            try shiftLBIndices(
-                                scratch_arena,
-                                &active_buffer.line_break_indices,
-                                active_buffer.cursor_coords.row + 1,
-                                1,
-                            );
 
                             // Insert the newline
-                            try active_buffer.points.insert(point_index, '\n');
 
                             active_buffer.cursor_coords = cellCoordsRight(
                                 &active_buffer.lines,
@@ -892,7 +777,7 @@ pub fn main() !void {
                                 10,
                             ) catch null;
                             if (line_num != null) {
-                                active_buffer.cursor_coords.row = std.math.clamp(line_num.?, 1, active_buffer.line_break_indices.items.len) - 1;
+                                //- BUG(cabarger): Something funky is going on since switch to TailQueue
                                 const cursor_p = rl.Vector2{
                                     .x = camera.target.x, // FIXME(caleb)
                                     .y = @as(f32, @floatFromInt(
@@ -1044,10 +929,6 @@ pub fn main() !void {
                         if (char_pressed == 'x') {
                             active_buffer.selection_coords.col = 0;
                             active_buffer.selection_coords.row = active_buffer.cursor_coords.row;
-                            active_buffer.cursor_coords.col = lineLenFromRow(
-                                &active_buffer.line_break_indices,
-                                active_buffer.cursor_coords.row,
-                            ) - 1;
                         } else if (char_pressed == 'd') {
                             // const selection_coords_point_index = charNodeFromCoords(
                             //     &active_buffer.lines,
@@ -1073,21 +954,10 @@ pub fn main() !void {
                                 start_point_index = selection_coords_point_index;
                                 end_point_index = cursor_coords_point_index;
                             }
-                            const selection_len = (end_point_index + 1) - start_point_index;
-                            for (0..selection_len) |_| {
-                                const removed_point = active_buffer.points.orderedRemove(start_point_index);
-                                if (removed_point == '\n') {
-                                    active_buffer.line_break_indices.items[selection_start.row] +=
-                                        lineLenFromRow(&active_buffer.line_break_indices, selection_start.row + 1);
-                                    _ = active_buffer.line_break_indices.orderedRemove(selection_start.row + 1);
-                                }
-                            }
-                            try shiftLBIndices(
-                                scratch_arena,
-                                &active_buffer.line_break_indices,
-                                selection_start.row,
-                                -@as(isize, @intCast(selection_len)),
-                            );
+                            // const selection_len = (end_point_index + 1) - start_point_index;
+                            // for (0..selection_len) |_| {
+                            //     if (removed_point == '\n') {}
+                            // }
                             active_buffer.cursor_coords = selection_start;
                             mode = .normal;
                         }
@@ -1293,6 +1163,7 @@ pub fn main() !void {
             const selection_point = 0;
             const start_point_index = @min(cursor_point, selection_point);
             const end_point_index = @max(cursor_point, selection_point);
+            _ = end_point_index;
 
             var x_offset: c_int = 0;
             var y_offset: c_int = 0;
@@ -1304,25 +1175,25 @@ pub fn main() !void {
                 y_offset = @as(c_int, @intCast(active_buffer.selection_coords.row)) * font.baseSize;
             }
 
-            for (active_buffer.points.items[start_point_index .. end_point_index + 1]) |point| {
-                rl.DrawRectangle(
-                    x_offset,
-                    y_offset,
-                    refrence_glyph_info.image.width,
-                    font.baseSize,
-                    rl.Color{ .r = 255, .g = 0xa5, .b = 0x00, .a = 128 },
-                );
+            // for (active_buffer.points.items[start_point_index .. end_point_index + 1]) |point| {
+            //     rl.DrawRectangle(
+            //         x_offset,
+            //         y_offset,
+            //         refrence_glyph_info.image.width,
+            //         font.baseSize,
+            //         rl.Color{ .r = 255, .g = 0xa5, .b = 0x00, .a = 128 },
+            //     );
 
-                if (point == '\n') {
-                    y_offset += font.baseSize;
-                    x_offset = refrence_glyph_info.image.width * 4;
-                }
-                if (point == '\t') {
-                    x_offset += refrence_glyph_info.image.width * 4;
-                } else {
-                    x_offset += refrence_glyph_info.image.width;
-                }
-            }
+            //     if (point == '\n') {
+            //         y_offset += font.baseSize;
+            //         x_offset = refrence_glyph_info.image.width * 4;
+            //     }
+            //     if (point == '\t') {
+            //         x_offset += refrence_glyph_info.image.width * 4;
+            //     } else {
+            //         x_offset += refrence_glyph_info.image.width;
+            //     }
+            // }
         }
 
         rl.EndMode2D();
@@ -1365,6 +1236,10 @@ pub fn main() !void {
                     .a = 128,
                 },
             );
+        } else {
+
+            //- cabarger: Draw status bar
+
         }
 
         // Draw debug info
