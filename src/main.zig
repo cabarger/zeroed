@@ -585,12 +585,11 @@ pub fn main() !void {
 
                         //- cabarger: Move to end of line and enter insert mode
                         else if (char_pressed == 'A') {
-                            const current_line_node =
-                                lineNodeFromRow(&active_buffer.lines, active_buffer.cursor_coords.row);
-                            var new_cursor_col: usize = 0;
-                            if (current_line_node.data.len != 0)
-                                active_buffer.cursor_coords = current_line_node.data.len - 1;
-                            mode = .insert;
+                            // const current_line_node =
+                            //     lineNodeFromRow(&active_buffer.lines, active_buffer.cursor_coords.row);
+                            // if (current_line_node.data.len != 0)
+                            //     active_buffer.cursor_coords = current_line_node.data.len - 1;
+                            // mode = .insert;
                         }
 
                         //- cabarger: Advance right and enter insert mode
