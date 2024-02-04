@@ -382,7 +382,7 @@ pub fn main() !void {
     rl.SetExitKey(0);
 
     var font_size: c_int = default_font_size;
-    var font: rl.Font = rl.LoadFontEx("FiraCode-Regular.ttf", font_size, null, 0);
+    var font: rl.Font = rl.LoadFontEx("ComicMono.ttf", font_size, null, 0);
     var refrence_glyph_info: rl.GlyphInfo = rl.GetGlyphInfo(font, ' ');
 
     var rows: usize = @divTrunc(screen_height, @as(usize, @intCast(font.baseSize)));
@@ -451,14 +451,14 @@ pub fn main() !void {
                         if (key_pressed == rl.KEY_MINUS) {
                             rl.UnloadFont(font);
                             font_size -= 1;
-                            font = rl.LoadFontEx("FiraCode-Regular.ttf", font_size, null, 0);
+                            font = rl.LoadFontEx("ComicMono.ttf", font_size, null, 0);
                             refrence_glyph_info = rl.GetGlyphInfo(font, ' ');
                             rows = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
                             cols = @divFloor(screen_width, @as(usize, @intCast(refrence_glyph_info.image.width)));
                         } else if (key_pressed == rl.KEY_EQUAL) {
                             rl.UnloadFont(font);
                             font_size += 1;
-                            font = rl.LoadFontEx("FiraCode-Regular.ttf", font_size, null, 0);
+                            font = rl.LoadFontEx("ComicMono.ttf", font_size, null, 0);
                             refrence_glyph_info = rl.GetGlyphInfo(font, ' ');
                             rows = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
                             cols = @divFloor(screen_width, @as(usize, @intCast(refrence_glyph_info.image.width)));
@@ -585,6 +585,11 @@ pub fn main() !void {
 
                         //- cabarger: Move to end of line and enter insert mode
                         else if (char_pressed == 'A') {
+                            const current_line_node =
+                                lineNodeFromRow(&active_buffer.lines, active_buffer.cursor_coords.row);
+                            var new_cursor_col: usize = 0;
+                            if (current_line_node.data.len != 0)
+                                active_buffer.cursor_coords = current_line_node.data.len - 1;
                             mode = .insert;
                         }
 
@@ -670,7 +675,6 @@ pub fn main() !void {
                                 if (next_line_node != null) {
 
                                     //- cabarger: Append next lines contents
-                                    // var next_line_char_node = next_line_node.?.data.first;
                                     while (next_line_node.?.data.popFirst()) |next_line_char_node| {
                                         current_line_node.data.append(next_line_char_node);
                                     }
