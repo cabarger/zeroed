@@ -119,7 +119,24 @@ fn DEBUGPrintLine(line_node: *TailQueue(TailQueue(u8)).Node) void {
     std.debug.print("\n", .{});
 }
 
-fn bufferLoadFile(buffer: *Buffer, scratch_arena: *heap.ArenaAllocator, path: []const u8) !void {
+const nil_char_node = TailQueue(u8).Node{
+    .prev = null,
+    .next = null,
+    .data = 0,
+};
+
+fn bufferNewCharNode(buffer: *Buffer, char: u8) *TailQueue(u8).Node {
+    var char_node = buffer.char_nodes_pool.create() catch return @constCast(&nil_char_node);
+    char_node.data = char;
+    char_node.next = null;
+    return char_node;
+}
+
+fn bufferLoadFile(
+    buffer: *Buffer,
+    scratch_arena: *heap.ArenaAllocator,
+    path: []const u8,
+) !void {
     bufferReset(buffer); //- cabarger: This is a waste for the initial buffer but whatever.
     _ = scratch_arena;
     var f = try std.fs.cwd().createFile(path, .{ .truncate = false, .read = true });
@@ -146,11 +163,6 @@ fn bufferLoadFile(buffer: *Buffer, scratch_arena: *heap.ArenaAllocator, path: []
             buffer.lines.append(line_node);
         }
     }
-
-    // removeCR(
-    //     scratch_arena,
-    //     &buffer.points,
-    // );
 
     for (path, 0..) |path_byte, path_byte_index|
         buffer.file_path_buf[path_byte_index] = path_byte;
@@ -204,17 +216,43 @@ fn buffersReleaseColdest(buffers: []Buffer) !*Buffer {
 const shift_width = 4;
 const default_font_size = 25;
 
-fn charNodeFromLineAndCoords(
+fn bufferCharNodeFromLineNode(
+    buffer: *Buffer,
     line_node: *TailQueue(TailQueue(u8)).Node,
-    coords: BufferCoords,
 ) *TailQueue(u8).Node {
     var result: ?*TailQueue(u8).Node = null;
     result = line_node.data.first;
     var char_node_index: usize = 0;
     while (result != null) : (result = result.?.next) {
-        if (char_node_index == coords.col)
+        if (char_node_index == buffer.cursor_coords.col)
             return result.?;
         char_node_index += 1;
+    }
+    unreachable;
+}
+
+fn charNodeFromLineAndCol(
+    line_node: *TailQueue(TailQueue(u8)).Node,
+    col: usize,
+) *TailQueue(u8).Node {
+    var result: ?*TailQueue(u8).Node = null;
+    result = line_node.data.first;
+    var char_node_index: usize = 0;
+    while (result != null) : (result = result.?.next) {
+        if (char_node_index == col)
+            return result.?;
+        char_node_index += 1;
+    }
+    unreachable;
+}
+
+inline fn bufferLineNode(buffer: *Buffer) *TailQueue(TailQueue(u8)).Node {
+    var result = buffer.lines.first;
+    var line_index: usize = 0;
+    while (result != null) : (result = result.?.next) {
+        if (line_index == buffer.cursor_coords.row)
+            return result orelse unreachable;
+        line_index += 1;
     }
     unreachable;
 }
@@ -227,7 +265,7 @@ inline fn lineNodeFromRow(
     var line_index: usize = 0;
     while (result != null) : (result = result.?.next) {
         if (line_index == row)
-            return result.?;
+            return result orelse unreachable;
         line_index += 1;
     }
     unreachable;
@@ -267,6 +305,62 @@ inline fn cellCoordsLeft(
         result.col -= 1;
     }
     return result;
+}
+
+fn bufferInsertCharAt(buffer: *Buffer, char: u8, cursor_coords: BufferCoords) *TailQueue(u8).Node {
+    var line_node = lineNodeFromRow(
+        &buffer.lines,
+        cursor_coords.row,
+    );
+    const char_node = charNodeFromLineAndCol(
+        line_node,
+        cursor_coords.col,
+    );
+    var new_char_node = bufferNewCharNode(buffer, char);
+    line_node.data.insertBefore(char_node, new_char_node);
+
+    //- FIXME(cabarger): Check a hash on attempt to quit??
+    //- I don't like these lines sprinkled everywhere.
+    buffer.needs_write = true;
+    buffer.modified_time = rl.GetTime();
+
+    return new_char_node;
+}
+
+fn bufferRemoveCharAt(buffer: *Buffer, cursor_coords: BufferCoords) void {
+    var current_line_node = lineNodeFromRow(
+        &buffer.lines,
+        cursor_coords.row,
+    );
+    const char_node = charNodeFromLineAndCol(
+        current_line_node,
+        cursor_coords.col,
+    );
+
+    //- cabarger: Do stuff because we are removing a new line
+    if (char_node.data == '\n') {
+        var next_line_node = current_line_node.next;
+        if (next_line_node != null) {
+
+            //- cabarger: Append next lines contents to current line
+            while (next_line_node.?.data.popFirst()) |next_line_char_node|
+                current_line_node.data.append(next_line_char_node);
+
+            //- Remove next line
+            buffer.lines.remove(next_line_node.?);
+            buffer.line_nodes_pool.destroy(next_line_node.?);
+        }
+    }
+
+    //- cabarger: Remove the char
+    current_line_node.data.remove(char_node);
+    buffer.char_nodes_pool.destroy(char_node);
+
+    //- cabarger: Is THIS line empty? If so remove it.
+    if (current_line_node.data.first == null) {
+        buffer.lines.remove(current_line_node);
+        buffer.line_nodes_pool.destroy(current_line_node);
+    }
 }
 
 inline fn cellCoordsUp(
@@ -349,20 +443,6 @@ inline fn indentChars(
             char_node.data = ' ';
             char_node_list.insertAfter(char_node_start.?, char_node);
         }
-    }
-}
-
-fn removeCR(scratch_arena: *std.heap.ArenaAllocator, points: *ArrayList(u8)) void {
-    var temp_arena = heap.ArenaAllocator.init(scratch_arena.allocator());
-    defer _ = temp_arena.reset(.free_all);
-
-    var cr_indices_list = ArrayList(usize).init(temp_arena.allocator());
-    for (points.items, 0..) |point, point_index| {
-        if (point == '\r')
-            cr_indices_list.append(point_index) catch unreachable;
-    }
-    for (cr_indices_list.items, 0..) |cr_index, crs_removed| {
-        _ = points.orderedRemove(cr_index - crs_removed);
     }
 }
 
@@ -650,107 +730,74 @@ pub fn main() !void {
                                 for (0..white_space_count) |_|
                                     _ = line_node.data.popFirst();
                             }
-                        }
-
-                        //- cabarger: Remove the character under the cursor
-                        else if (char_pressed == 'd') {
-
-                            //- cabarger: Get the current line
-                            var current_line_node = lineNodeFromRow(
-                                &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                            );
-
-                            //- cabarger: Character node from cursor and line
-                            const char_node = charNodeFromLineAndCoords(
-                                current_line_node,
+                        } else if (char_pressed == 'd') {
+                            bufferRemoveCharAt(
+                                active_buffer,
                                 active_buffer.cursor_coords,
                             );
-
-                            //- cabarger: Do stuff because we are removing a new line
-                            if (char_node.data == '\n') {
-                                //- cabarger: Attempt to get the next line
-                                var next_line_node = current_line_node.next;
-                                if (next_line_node != null) {
-
-                                    //- cabarger: Append next lines contents
-                                    while (next_line_node.?.data.popFirst()) |next_line_char_node| {
-                                        current_line_node.data.append(next_line_char_node);
-                                    }
-
-                                    //- Remove the next line
-                                    active_buffer.lines.remove(next_line_node.?);
-                                    active_buffer.line_nodes_pool.destroy(next_line_node.?);
-                                }
-                            }
-
-                            //- cabarger: Remove the char
-                            current_line_node.data.remove(char_node);
-                            active_buffer.char_nodes_pool.destroy(char_node);
-
-                            //- cabarger: Is this line empty? If so remove it.
-                            if (current_line_node.data.first == null) {
-                                active_buffer.lines.remove(current_line_node);
-                                active_buffer.line_nodes_pool.destroy(current_line_node);
-                            }
                         }
                     },
                     .insert => {
+                        //- cabarger: Insert charcater at cursor position
                         if (char_pressed != 0) {
-                            // const point_index = charNodeFromCoords(
-                            //     &active_buffer.lines,
-                            //     active_buffer.cursor_coords,
-                            // );
-                            // _ = point_index;
+                            _ = bufferInsertCharAt(
+                                active_buffer,
+                                char_pressed,
+                                active_buffer.cursor_coords,
+                            );
                             active_buffer.cursor_coords = cellCoordsRight(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
                                 active_buffer.cursor_coords.col,
                             );
-
-                            active_buffer.needs_write = true;
-                            active_buffer.modified_time = rl.GetTime();
                         }
 
                         if (key_pressed == rl.KEY_CAPS_LOCK or key_pressed == rl.KEY_ESCAPE) {
                             mode = .normal;
-                        } else if (key_pressed == rl.KEY_BACKSPACE) {
-                            // const point_index = charNodeFromCoords(
-                            //     &active_buffer.lines,
-                            //     active_buffer.cursor_coords,
-                            // );
-                            const point_index = 0;
-                            if (point_index != 0) {
-                                //- cabarger: Can I/Should I couple point removals/insertions and line
-                                // break index updates???
-                                var removed_point: u8 = 0;
-                                if (removed_point == '\n') { // When hitting a newline
-                                }
+                        }
+
+                        //- cabarger: Remove character before current cursor coords.
+                        else if (key_pressed == rl.KEY_BACKSPACE) {
+                            //- cabarger: No-op if we are at 0,0.
+                            if (active_buffer.cursor_coords.row != 0 or active_buffer.cursor_coords.col != 0) {
                                 active_buffer.cursor_coords = cellCoordsLeft(
                                     &active_buffer.lines,
                                     active_buffer.cursor_coords.row,
                                     active_buffer.cursor_coords.col,
                                 );
+                                bufferRemoveCharAt(
+                                    active_buffer,
+                                    active_buffer.cursor_coords,
+                                );
                             }
                         } else if (key_pressed == rl.KEY_ENTER) {
-                            // Where is this in the points buffer
-                            // const point_index = charNodeFromCoords(
-                            //     &active_buffer.lines,
-                            //     active_buffer.cursor_coords,
-                            // );
-                            const point_index = 0;
-                            _ = point_index;
+                            //- cabarger: Insert newline character
+                            var line_node = lineNodeFromRow(
+                                &active_buffer.lines,
+                                active_buffer.cursor_coords.row,
+                            );
+                            var char_node = bufferInsertCharAt(
+                                active_buffer,
+                                '\n',
+                                active_buffer.cursor_coords,
+                            );
 
-                            // Line length prior to newline insertion
-                            const old_line_len = 0;
+                            var new_line_node = try active_buffer.line_nodes_pool.create();
+                            {
+                                new_line_node.data = TailQueue(u8){};
+                                new_line_node.next = null;
+                                var curr_char_node = char_node.next;
+                                while (curr_char_node != null) {
+                                    var new_char_node = bufferNewCharNode(active_buffer, curr_char_node.?.data);
+                                    new_line_node.data.append(new_char_node);
 
-                            // How much to increment line break indices
-                            const increment_len = old_line_len - active_buffer.cursor_coords.col;
-                            _ = increment_len;
-
-                            // Set current row to newline point index
-
-                            // Insert the newline
+                                    var last = curr_char_node;
+                                    curr_char_node = curr_char_node.?.next;
+                                    line_node.data.remove(last.?);
+                                    active_buffer.char_nodes_pool.destroy(last.?);
+                                }
+                            }
+                            active_buffer.lines.insertAfter(line_node, new_line_node);
 
                             active_buffer.cursor_coords = cellCoordsRight(
                                 &active_buffer.lines,
