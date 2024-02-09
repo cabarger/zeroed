@@ -119,10 +119,17 @@ fn DEBUGPrintLine(line_node: *TailQueue(TailQueue(u8)).Node) void {
     std.debug.print("\n", .{});
 }
 
-const nil_char_node = TailQueue(u8).Node{
+// NOTE(caleb): It's a bug to write to either of these, is there a way to make them
+// read only??
+var nil_char_node = TailQueue(u8).Node{
     .prev = null,
     .next = null,
     .data = 0,
+};
+var nil_line_node = TailQueue(TailQueue(u8)).Node{
+    .next = null,
+    .prev = null,
+    .data = TailQueue(u8){},
 };
 
 fn bufferNewCharNode(buffer: *Buffer, char: u8) *TailQueue(u8).Node {
@@ -213,6 +220,19 @@ fn buffersReleaseColdest(buffers: []Buffer) !*Buffer {
     return coldest_buffer;
 }
 
+inline fn isValidCursorP(
+    lines: *TailQueue(TailQueue(u8)),
+    p: @Vector(2, isize),
+) bool {
+    var result = false;
+    if (@reduce(.And, (p >= @Vector(2, isize){ 0, 0 }))) {
+        var line_node = lineNodeFromRow(lines, @intCast(p[1]));
+        var char_node = charNodeFromLineAndCol(line_node, @intCast(p[0]));
+        result = (char_node.data != 0);
+    }
+    return result;
+}
+
 const shift_width = 4;
 const default_font_size = 25;
 
@@ -235,15 +255,14 @@ fn charNodeFromLineAndCol(
     line_node: *TailQueue(TailQueue(u8)).Node,
     col: usize,
 ) *TailQueue(u8).Node {
-    var result: ?*TailQueue(u8).Node = null;
-    result = line_node.data.first;
+    var result = line_node.data.first;
     var char_node_index: usize = 0;
     while (result != null) : (result = result.?.next) {
         if (char_node_index == col)
             return result.?;
         char_node_index += 1;
     }
-    unreachable;
+    return &nil_char_node;
 }
 
 inline fn bufferLineNode(buffer: *Buffer) *TailQueue(TailQueue(u8)).Node {
@@ -265,46 +284,41 @@ inline fn lineNodeFromRow(
     var line_index: usize = 0;
     while (result != null) : (result = result.?.next) {
         if (line_index == row)
-            return result orelse unreachable;
+            return result.?;
         line_index += 1;
     }
-    unreachable;
+    return &nil_line_node;
 }
 
-inline fn cellCoordsRight(
+inline fn cursorRight(
     lines: *TailQueue(TailQueue(u8)),
-    row: usize,
-    col: usize,
+    p: @Vector(2, usize),
 ) BufferCoords {
-    var result = BufferCoords{ .row = row, .col = col };
-    var current_line_node = lineNodeFromRow(lines, row);
-    if (col == current_line_node.data.len - 1) {
-        if (current_line_node.next != null) {
-            result.col = 0;
-            result.row += 1;
-        }
-    } else {
-        result.col += 1;
+    var result: @Vector(2, isize) = @intCast(p);
+    if (isValidCursorP(lines, result + @Vector(2, isize){ 1, 0 })) {
+        result[0] += 1;
+    } else if (isValidCursorP(lines, @Vector(2, isize){ 0, result[1] + 1 })) {
+        result = .{ 0, result[1] + 1 };
     }
-    return result;
+    return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
 }
 
-inline fn cellCoordsLeft(
+inline fn cursorLeft(
     lines: *TailQueue(TailQueue(u8)),
-    row: usize,
-    col: usize,
+    p: @Vector(2, usize),
 ) BufferCoords {
-    var result = BufferCoords{ .row = row, .col = col };
-    var current_line_node = lineNodeFromRow(lines, row);
-    if (col == 0) {
-        if (current_line_node.prev != null) {
-            result.col = current_line_node.prev.?.data.len - 1;
-            result.row -= 1;
-        }
-    } else {
-        result.col -= 1;
+
+    if (isVali
+
+    
+    var result: @Vector(2, isize) = @intCast(p);
+    if (isValidCursorP(lines, result - @Vector(2, isize){ 1, 0 })) {
+        result[0] -= 1;
+    } else if (isValidCursorP(lines, @Vector(2, isize){ 0, result[1] - 1 })) {
+        var line_node = lineNodeFromRow(lines, @intCast(result[1] - 1));
+        result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] - 1) };
     }
-    return result;
+    return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
 }
 
 fn bufferInsertCharAt(buffer: *Buffer, char: u8, cursor_coords: BufferCoords) *TailQueue(u8).Node {
@@ -363,7 +377,7 @@ fn bufferRemoveCharAt(buffer: *Buffer, cursor_coords: BufferCoords) void {
     }
 }
 
-inline fn cellCoordsUp(
+inline fn cursorUp(
     lines: *TailQueue(TailQueue(u8)),
     row: usize,
     col: usize,
@@ -379,7 +393,7 @@ inline fn cellCoordsUp(
     return result;
 }
 
-inline fn cellCoordsDown(
+inline fn coordsDown(
     lines: *TailQueue(TailQueue(u8)),
     row: usize,
     col: usize,
@@ -441,7 +455,7 @@ inline fn indentChars(
         for (0..shift_width) |_| {
             var char_node = try char_nodes_pool.create();
             char_node.data = ' ';
-            char_node_list.insertAfter(char_node_start.?, char_node);
+            char_node_list.insertBefore(char_node_start.?, char_node);
         }
     }
 }
@@ -549,7 +563,7 @@ pub fn main() !void {
 
                         //- cabarger: Move cursor up/down/left/right
                         else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
-                            active_buffer.cursor_coords = cellCoordsUp(
+                            active_buffer.cursor_coords = cursorUp(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
                                 active_buffer.cursor_coords.col,
@@ -564,7 +578,7 @@ pub fn main() !void {
                                 target_p = rl.Vector2Subtract(target_p, .{ .x = 0, .y = @floatFromInt(font.baseSize) });
                             }
                         } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
-                            active_buffer.cursor_coords = cellCoordsDown(
+                            active_buffer.cursor_coords = coordsDown(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
                                 active_buffer.cursor_coords.col,
@@ -579,67 +593,71 @@ pub fn main() !void {
                                 target_p = rl.Vector2Subtract(cursor_p, .{ .x = 0, .y = @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize))) });
                             }
                         } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
-                            active_buffer.cursor_coords = cellCoordsRight(
+                            active_buffer.cursor_coords = cursorRight(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
+                                .{
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
+                                },
                             );
                         } else if (key_pressed == rl.KEY_LEFT or char_pressed == 'h') {
-                            active_buffer.cursor_coords = cellCoordsLeft(
+                            active_buffer.cursor_coords = cursorLeft(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
+                                .{
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
+                                },
                             );
                         }
 
                         //- cabarger: Scroll buffer up/down by half a screen
                         else if (ctrl_is_held and key_pressed == rl.KEY_D) {
-                            target_p = rl.Vector2Add(target_p, .{
-                                .x = 0,
-                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2)))),
-                            });
                             for (0..@divFloor(rows, 2)) |_|
-                                active_buffer.cursor_coords = cellCoordsDown(
+                                active_buffer.cursor_coords = coordsDown(
                                     &active_buffer.lines,
                                     active_buffer.cursor_coords.row,
                                     active_buffer.cursor_coords.col,
                                 );
+                            target_p = rl.Vector2{
+                                .x = 0.0,
+                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(active_buffer.cursor_coords.row))),
+                            };
                         } else if (ctrl_is_held and key_pressed == rl.KEY_U) {
-                            target_p = rl.Vector2Subtract(target_p, .{
-                                .x = 0,
-                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(@divFloor(rows, 2)))),
-                            });
                             for (0..@divFloor(rows, 2)) |_|
-                                active_buffer.cursor_coords = cellCoordsUp(
+                                active_buffer.cursor_coords = cursorUp(
                                     &active_buffer.lines,
                                     active_buffer.cursor_coords.row,
                                     active_buffer.cursor_coords.col,
                                 );
+                            target_p = rl.Vector2{
+                                .x = 0.0,
+                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(active_buffer.cursor_coords.row))),
+                            };
                         }
 
                         //- cabarger: Scroll buffer up/down by a screen
                         else if (key_pressed == rl.KEY_PAGE_DOWN) {
-                            target_p = rl.Vector2Add(target_p, .{
-                                .x = 0,
-                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(rows))),
-                            });
                             for (0..rows) |_|
-                                active_buffer.cursor_coords = cellCoordsDown(
+                                active_buffer.cursor_coords = coordsDown(
                                     &active_buffer.lines,
                                     active_buffer.cursor_coords.row,
                                     active_buffer.cursor_coords.col,
                                 );
+                            target_p = rl.Vector2{
+                                .x = 0.0,
+                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(active_buffer.cursor_coords.row))),
+                            };
                         } else if (key_pressed == rl.KEY_PAGE_UP) {
-                            target_p = rl.Vector2Subtract(target_p, .{
-                                .x = 0,
-                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(rows))),
-                            });
                             for (0..rows) |_|
-                                active_buffer.cursor_coords = cellCoordsUp(
+                                active_buffer.cursor_coords = cursorUp(
                                     &active_buffer.lines,
                                     active_buffer.cursor_coords.row,
                                     active_buffer.cursor_coords.col,
                                 );
+                            target_p = rl.Vector2{
+                                .x = 0.0,
+                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(active_buffer.cursor_coords.row))),
+                            };
                         }
 
                         ///////////////////////////////
@@ -665,11 +683,12 @@ pub fn main() !void {
 
                         //- cabarger: Move to end of line and enter insert mode
                         else if (char_pressed == 'A') {
-                            // const current_line_node =
-                            //     lineNodeFromRow(&active_buffer.lines, active_buffer.cursor_coords.row);
-                            // if (current_line_node.data.len != 0)
-                            //     active_buffer.cursor_coords = current_line_node.data.len - 1;
-                            // mode = .insert;
+                            const line_node = lineNodeFromRow(
+                                &active_buffer.lines,
+                                active_buffer.cursor_coords.row,
+                            );
+                            active_buffer.cursor_coords.col = line_node.data.len - 1;
+                            mode = .insert;
                         }
 
                         //- cabarger: Advance right and enter insert mode
@@ -681,10 +700,12 @@ pub fn main() !void {
                             // );
                             // _ = point_index;
 
-                            active_buffer.cursor_coords = cellCoordsRight(
+                            active_buffer.cursor_coords = cursorRight(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
+                                .{
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
+                                },
                             );
                             mode = .insert;
                         }
@@ -735,6 +756,8 @@ pub fn main() !void {
                                 active_buffer,
                                 active_buffer.cursor_coords,
                             );
+                            // if (active_buffer.cursor_coords.row >= active_buffer.lines.len)
+                            //     active_buffer.cursor_coords.row -= 1;
                         }
                     },
                     .insert => {
@@ -745,10 +768,12 @@ pub fn main() !void {
                                 char_pressed,
                                 active_buffer.cursor_coords,
                             );
-                            active_buffer.cursor_coords = cellCoordsRight(
+                            active_buffer.cursor_coords = cursorRight(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
+                                .{
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
+                                },
                             );
                         }
 
@@ -760,10 +785,13 @@ pub fn main() !void {
                         else if (key_pressed == rl.KEY_BACKSPACE) {
                             //- cabarger: No-op if we are at 0,0.
                             if (active_buffer.cursor_coords.row != 0 or active_buffer.cursor_coords.col != 0) {
-                                active_buffer.cursor_coords = cellCoordsLeft(
+                                active_buffer.cursor_coords = cursorLeft(
                                     &active_buffer.lines,
-                                    active_buffer.cursor_coords.row,
-                                    active_buffer.cursor_coords.col,
+
+                                    .{
+                                        active_buffer.cursor_coords.col,
+                                        active_buffer.cursor_coords.row,
+                                    },
                                 );
                                 bufferRemoveCharAt(
                                     active_buffer,
@@ -799,10 +827,12 @@ pub fn main() !void {
                             }
                             active_buffer.lines.insertAfter(line_node, new_line_node);
 
-                            active_buffer.cursor_coords = cellCoordsRight(
+                            active_buffer.cursor_coords = cursorRight(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
+                                .{
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
+                                },
                             );
                         } else if (key_pressed == rl.KEY_TAB) {
                             const line_node = lineNodeFromRow(
@@ -933,7 +963,7 @@ pub fn main() !void {
                         if (key_pressed == rl.KEY_CAPS_LOCK or key_pressed == rl.KEY_ESCAPE) {
                             mode = .normal;
                         } else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
-                            active_buffer.cursor_coords = cellCoordsUp(
+                            active_buffer.cursor_coords = cursorUp(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
                                 active_buffer.cursor_coords.col,
@@ -948,7 +978,7 @@ pub fn main() !void {
                                 target_p = rl.Vector2Subtract(target_p, .{ .x = 0, .y = @floatFromInt(font.baseSize) });
                             }
                         } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
-                            active_buffer.cursor_coords = cellCoordsDown(
+                            active_buffer.cursor_coords = coordsDown(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
                                 active_buffer.cursor_coords.col,
@@ -963,16 +993,21 @@ pub fn main() !void {
                                 target_p = rl.Vector2Subtract(cursor_p, .{ .x = 0, .y = @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize))) });
                             }
                         } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
-                            active_buffer.cursor_coords = cellCoordsRight(
+                            active_buffer.cursor_coords = cursorRight(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
+                                .{
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
+                                },
                             );
                         } else if (key_pressed == rl.KEY_LEFT or char_pressed == 'h') {
-                            active_buffer.cursor_coords = cellCoordsLeft(
+                            active_buffer.cursor_coords = cursorLeft(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
+
+                                .{
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
+                                },
                             );
                         }
 
@@ -1055,7 +1090,7 @@ pub fn main() !void {
                     @as(f32, @floatFromInt(font.baseSize)),
                 ))),
             );
-            const end_camera_row = @min(active_buffer_line_count, start_camera_row + rows);
+            const end_camera_row = @min(active_buffer_line_count, start_camera_row + rows + 2);
 
             var line_index: usize = 0;
             var current_line = active_buffer.lines.first;
@@ -1161,7 +1196,7 @@ pub fn main() !void {
 
         // Draw line highlight
         rl.DrawRectangle(
-            @as(c_int, @intFromFloat(cursor_p.x)),
+            @as(c_int, @intFromFloat(0.0)),
             @as(c_int, @intFromFloat(cursor_p.y)),
             @as(c_int, @intCast(cols)) * refrence_glyph_info.image.width,
             font.baseSize,
