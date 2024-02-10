@@ -36,9 +36,15 @@ const ArrayList = std.ArrayList;
 const TailQueue = std.TailQueue;
 
 const background_color = rl.Color{ .r = 10, .g = 10, .b = 10, .a = 255 };
-const DEBUG_draw_nls = true;
 
-const Mode = enum {
+const mode_strs = [_][]const c_int{
+    &[_]c_int{ 'N', 'O', 'R' },
+    &[_]c_int{ 'I', 'N', 'S' },
+    &[_]c_int{ 'C', 'M', 'D' },
+    &[_]c_int{ 'S', 'E', 'L' },
+};
+
+const Mode = enum(u8) {
     normal,
     insert,
     command,
@@ -52,6 +58,8 @@ const BufferCoords = struct {
 
 const Buffer = struct {
     arena: heap.ArenaAllocator,
+
+    camera_p: @Vector(2, usize),
     selection_coords: BufferCoords,
     cursor_coords: BufferCoords,
 
@@ -106,6 +114,7 @@ fn bufferReset(buffer: *Buffer) void {
     buffer.file_path = undefined;
     buffer.needs_write = false;
     buffer.modified_time = 0.0;
+    buffer.camera_p = .{ 0, 0 };
     buffer.cursor_coords = .{ .row = 0, .col = 0 };
     buffer.selection_coords = .{ .row = 0, .col = 0 };
     buffer.active = false;
@@ -178,9 +187,6 @@ fn bufferLoadFile(
 
     buffer.active = true; //- cabarger: I don't know where this should happen... Here is fine for now.
 }
-
-// fn updateCameraFromCursorP() void {
-// }
 
 fn bufferWriteToDisk(buffer: *Buffer) !void {
     var f = try std.fs.cwd().createFile(buffer.file_path, .{});
@@ -365,20 +371,18 @@ inline fn cursorUp(
     return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
 }
 
-inline fn coordsDown(
+inline fn cursorDown(
     lines: *TailQueue(TailQueue(u8)),
-    row: usize,
-    col: usize,
+    p: @Vector(2, usize),
 ) BufferCoords {
-    var result = BufferCoords{ .row = row, .col = col };
-    var current_line = lineNodeFromRow(lines, row);
-    if (current_line.next != null) {
-        const next_line_len = current_line.next.?.data.len;
-        if (next_line_len <= col)
-            result.col = next_line_len - 1;
-        result.row += 1;
+    var result: @Vector(2, isize) = @intCast(p);
+    if (isValidCursorP(lines, result + @Vector(2, isize){ 0, 1 })) {
+        result[1] += 1;
+    } else if (isValidCursorP(lines, @Vector(2, isize){ 0, result[1] + 1 })) {
+        var line_node = lineNodeFromRow(lines, @intCast(result[1] + 1));
+        result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] + 1) };
     }
-    return result;
+    return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
 }
 
 fn cellPFromCoords(
@@ -387,9 +391,10 @@ fn cellPFromCoords(
     refrence_glyph_info: *const rl.GlyphInfo,
     font: *const rl.Font,
 ) rl.Vector2 {
+    _ = font;
     var cursor_p = rl.Vector2{
         .x = 0.0,
-        .y = @floatFromInt(coords.row * @as(usize, @intCast(font.baseSize))),
+        .y = @floatFromInt(coords.row * @as(usize, @intCast(refrence_glyph_info.image.height))),
     };
     var current_line = lines.first;
     {
@@ -444,14 +449,14 @@ pub fn main() !void {
     rl.SetWindowIcon(rl.LoadImage("zeroed.png"));
     rl.SetConfigFlags(rl.FLAG_MSAA_4X_HINT);
     rl.SetWindowState(rl.FLAG_WINDOW_RESIZABLE);
-    rl.SetTargetFPS(120);
+    rl.SetTargetFPS(144);
     rl.SetExitKey(0);
 
     var font_size: c_int = default_font_size;
     var font: rl.Font = rl.LoadFontEx("ComicMono.ttf", font_size, null, 0);
     var refrence_glyph_info: rl.GlyphInfo = rl.GetGlyphInfo(font, ' ');
 
-    var rows: usize = @divTrunc(screen_height, @as(usize, @intCast(font.baseSize)));
+    var rows: usize = @divTrunc(screen_height, @as(usize, @intCast(refrence_glyph_info.image.height)));
     var cols: usize = @divTrunc(screen_width, @as(usize, @intCast(refrence_glyph_info.image.width)));
 
     var mode: Mode = .normal;
@@ -478,9 +483,10 @@ pub fn main() !void {
         .rotation = 0,
         .zoom = 1.0,
     };
+
     var target_rot: f32 = 0.0;
-    var target_p = camera.target;
     var draw_debug_info = false;
+    var DEBUG_draw_nls = false;
     var DEBUG_glyphs_drawn_this_frame: usize = 0;
 
     main_loop: while (true) {
@@ -490,13 +496,16 @@ pub fn main() !void {
         if (rl.IsWindowResized()) {
             screen_width = @intCast(rl.GetScreenWidth());
             screen_height = @intCast(rl.GetScreenHeight());
-            rows = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
+            rows = @divFloor(screen_height, @as(usize, @intCast(refrence_glyph_info.image.height)));
             cols = @divFloor(screen_width, @as(usize, @intCast(refrence_glyph_info.image.width)));
         }
 
-        if (rl.IsKeyPressed(rl.KEY_F1))
+        if (rl.IsKeyPressed(rl.KEY_F1)) {
             draw_debug_info = !draw_debug_info;
+            DEBUG_draw_nls = !DEBUG_draw_nls;
+        }
 
+        const rows_to_draw = rows - 2;
         last_cursor_p = active_buffer.cursor_coords;
 
         const alt_is_held = rl.IsKeyDown(rl.KEY_LEFT_ALT);
@@ -512,35 +521,30 @@ pub fn main() !void {
                 if (!rl.IsWindowMaximized()) rl.MaximizeWindow() else rl.RestoreWindow();
                 screen_width = @intCast(rl.GetScreenWidth());
                 screen_height = @intCast(rl.GetScreenHeight());
-                rows = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
+                rows = @divFloor(screen_height, @as(usize, @intCast(refrence_glyph_info.image.height)));
                 cols = @divFloor(screen_width, @as(usize, @intCast(refrence_glyph_info.image.width)));
             } else {
                 switch (mode) {
                     .normal => {
-
                         //- cabarger: UI
                         if (key_pressed == rl.KEY_MINUS) {
                             rl.UnloadFont(font);
                             font_size -= 1;
                             font = rl.LoadFontEx("ComicMono.ttf", font_size, null, 0);
                             refrence_glyph_info = rl.GetGlyphInfo(font, ' ');
-                            rows = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
+                            rows = @divFloor(screen_height, @as(usize, @intCast(refrence_glyph_info.image.height)));
                             cols = @divFloor(screen_width, @as(usize, @intCast(refrence_glyph_info.image.width)));
                         } else if (key_pressed == rl.KEY_EQUAL) {
                             rl.UnloadFont(font);
                             font_size += 1;
                             font = rl.LoadFontEx("ComicMono.ttf", font_size, null, 0);
                             refrence_glyph_info = rl.GetGlyphInfo(font, ' ');
-                            rows = @divFloor(screen_height, @as(usize, @intCast(font.baseSize)));
+                            rows = @divFloor(screen_height, @as(usize, @intCast(refrence_glyph_info.image.height)));
                             cols = @divFloor(screen_width, @as(usize, @intCast(refrence_glyph_info.image.width)));
                         }
 
-                        ///////////////////////////////
-                        //- cabarger: Navigation
-
                         //- cabarger: Move cursor up/down/left/right
                         else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
-                            last_cursor_p = active_buffer.cursor_coords;
                             active_buffer.cursor_coords = cursorUp(
                                 &active_buffer.lines,
                                 .{
@@ -549,19 +553,18 @@ pub fn main() !void {
                                 },
                             );
                         } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
-                            active_buffer.cursor_coords = coordsDown(
-                                &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
-                            );
-                        } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
-                            active_buffer.cursor_coords = cursorRight(
+                            active_buffer.cursor_coords = cursorDown(
                                 &active_buffer.lines,
                                 .{
                                     active_buffer.cursor_coords.col,
                                     active_buffer.cursor_coords.row,
                                 },
                             );
+                        } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
+                            active_buffer.cursor_coords = cursorRight(&active_buffer.lines, .{
+                                active_buffer.cursor_coords.col,
+                                active_buffer.cursor_coords.row,
+                            });
                         } else if (key_pressed == rl.KEY_LEFT or char_pressed == 'h') {
                             active_buffer.cursor_coords = cursorLeft(
                                 &active_buffer.lines,
@@ -574,18 +577,16 @@ pub fn main() !void {
 
                         //- cabarger: Scroll buffer up/down by half a screen
                         else if (ctrl_is_held and key_pressed == rl.KEY_D) {
-                            for (0..@divFloor(rows, 2)) |_|
-                                active_buffer.cursor_coords = coordsDown(
+                            for (0..@divFloor(rows_to_draw, 2)) |_|
+                                active_buffer.cursor_coords = cursorDown(
                                     &active_buffer.lines,
-                                    active_buffer.cursor_coords.row,
-                                    active_buffer.cursor_coords.col,
+                                    .{
+                                        active_buffer.cursor_coords.col,
+                                        active_buffer.cursor_coords.row,
+                                    },
                                 );
-                            target_p = rl.Vector2{
-                                .x = 0.0,
-                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(active_buffer.cursor_coords.row))),
-                            };
                         } else if (ctrl_is_held and key_pressed == rl.KEY_U) {
-                            for (0..@divFloor(rows, 2)) |_|
+                            for (0..@divFloor(rows_to_draw, 2)) |_|
                                 active_buffer.cursor_coords = cursorUp(
                                     &active_buffer.lines,
 
@@ -594,26 +595,20 @@ pub fn main() !void {
                                         active_buffer.cursor_coords.row,
                                     },
                                 );
-                            target_p = rl.Vector2{
-                                .x = 0.0,
-                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(active_buffer.cursor_coords.row))),
-                            };
                         }
 
                         //- cabarger: Scroll buffer up/down by a screen
                         else if (key_pressed == rl.KEY_PAGE_DOWN) {
-                            for (0..rows) |_|
-                                active_buffer.cursor_coords = coordsDown(
+                            for (0..rows_to_draw) |_|
+                                active_buffer.cursor_coords = cursorDown(
                                     &active_buffer.lines,
-                                    active_buffer.cursor_coords.row,
-                                    active_buffer.cursor_coords.col,
+                                    .{
+                                        active_buffer.cursor_coords.col,
+                                        active_buffer.cursor_coords.row,
+                                    },
                                 );
-                            target_p = rl.Vector2{
-                                .x = 0.0,
-                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(active_buffer.cursor_coords.row))),
-                            };
                         } else if (key_pressed == rl.KEY_PAGE_UP) {
-                            for (0..rows) |_|
+                            for (0..rows_to_draw) |_|
                                 active_buffer.cursor_coords = cursorUp(
                                     &active_buffer.lines,
 
@@ -622,14 +617,7 @@ pub fn main() !void {
                                         active_buffer.cursor_coords.row,
                                     },
                                 );
-                            target_p = rl.Vector2{
-                                .x = 0.0,
-                                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(active_buffer.cursor_coords.row))),
-                            };
                         }
-
-                        ///////////////////////////////
-                        //- cabarger: Mode shifts / navigation ??
 
                         //- cabarger: Enter insert mode
                         else if (key_pressed == rl.KEY_I) {
@@ -661,13 +649,6 @@ pub fn main() !void {
 
                         //- cabarger: Advance right and enter insert mode
                         else if (char_pressed == 'a') {
-                            // If inserting at end of buffer a second newline should be added as well!
-                            // const point_index = charNodeFromCoords(
-                            //     &active_buffer.lines,
-                            //     active_buffer.cursor_coords,
-                            // );
-                            // _ = point_index;
-
                             active_buffer.cursor_coords = cursorRight(
                                 &active_buffer.lines,
                                 .{
@@ -677,9 +658,6 @@ pub fn main() !void {
                             );
                             mode = .insert;
                         }
-
-                        ///////////////////////////////
-                        //- cabarger: Edit buffer
 
                         //- cabarger: Select entire line
                         else if (char_pressed == 'x') {
@@ -823,14 +801,7 @@ pub fn main() !void {
                                 10,
                             ) catch null;
                             if (line_num != null) {
-                                //- BUG(cabarger): Something funky is going on since switch to TailQueue
-                                const cursor_p = rl.Vector2{
-                                    .x = camera.target.x, // FIXME(caleb)
-                                    .y = @as(f32, @floatFromInt(
-                                        active_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
-                                    )),
-                                };
-                                target_p = cursor_p;
+                                active_buffer.cursor_coords.row = std.math.clamp(line_num.?, 1, active_buffer.lines.len) - 1;
                             } else {
                                 var command_buffer_pieces = mem.splitSequence(u8, command_points.items, " ");
                                 const command_buffer_first = command_buffer_pieces.first();
@@ -936,30 +907,14 @@ pub fn main() !void {
                                     active_buffer.selection_coords.row,
                                 },
                             );
-                            const cursor_p = rl.Vector2{
-                                .x = camera.target.x, // FIXME(caleb)
-                                .y = @as(f32, @floatFromInt(
-                                    active_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
-                                )),
-                            };
-                            if (cursor_p.y < camera.target.y) {
-                                target_p = rl.Vector2Subtract(target_p, .{ .x = 0, .y = @floatFromInt(font.baseSize) });
-                            }
                         } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
-                            active_buffer.cursor_coords = coordsDown(
+                            active_buffer.cursor_coords = cursorDown(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
+                                .{
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
+                                },
                             );
-                            const cursor_p = rl.Vector2{
-                                .x = camera.target.x, // FIXME(caleb)
-                                .y = @as(f32, @floatFromInt(
-                                    active_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
-                                )),
-                            };
-                            if (cursor_p.y > (camera.target.y + @as(f32, @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize)))))) {
-                                target_p = rl.Vector2Subtract(cursor_p, .{ .x = 0, .y = @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize))) });
-                            }
                         } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
                             active_buffer.cursor_coords = cursorRight(
                                 &active_buffer.lines,
@@ -983,15 +938,7 @@ pub fn main() !void {
                             active_buffer.selection_coords.col = 0;
                             active_buffer.selection_coords.row = active_buffer.cursor_coords.row;
                         } else if (char_pressed == 'd') {
-                            // const selection_coords_point_index = charNodeFromCoords(
-                            //     &active_buffer.lines,
-                            //     active_buffer.selection_coords,
-                            // );
                             const selection_coords_point_index = 0;
-                            // const cursor_coords_point_index = charNodeFromCoords(
-                            //     &active_buffer.lines,
-                            //     active_buffer.cursor_coords,
-                            // );
                             const cursor_coords_point_index = 0;
 
                             var selection_start: BufferCoords = undefined;
@@ -1007,10 +954,6 @@ pub fn main() !void {
                                 start_point_index = selection_coords_point_index;
                                 end_point_index = cursor_coords_point_index;
                             }
-                            // const selection_len = (end_point_index + 1) - start_point_index;
-                            // for (0..selection_len) |_| {
-                            //     if (removed_point == '\n') {}
-                            // }
                             active_buffer.cursor_coords = selection_start;
                             mode = .normal;
                         }
@@ -1028,24 +971,16 @@ pub fn main() !void {
         if ((last_cursor_p.row != active_buffer.cursor_coords.row) or
             (last_cursor_p.col != active_buffer.cursor_coords.col))
         {
-            const cursor_p = rl.Vector2{
-                .x = 0,
-                .y = @as(f32, @floatFromInt(
-                    active_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
-                )),
-            };
-            if (cursor_p.y < camera.target.y) {
-                target_p = rl.Vector2{
-                    .x = 0.0,
-                    .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(active_buffer.cursor_coords.row))),
-                };
-            } else if (cursor_p.y > (camera.target.y + @as(f32, @floatFromInt((rows) * @as(usize, @intCast(font.baseSize)))))) {
-                target_p = rl.Vector2Subtract(cursor_p, .{
-                    .x = 0,
-                    .y = @floatFromInt((rows) * @as(usize, @intCast(font.baseSize))),
-                });
+            if (active_buffer.cursor_coords.row < active_buffer.camera_p[1]) {
+                active_buffer.camera_p[1] = active_buffer.cursor_coords.row;
+            } else if (active_buffer.cursor_coords.row > active_buffer.camera_p[1] + rows_to_draw - 1) {
+                active_buffer.camera_p[1] += active_buffer.cursor_coords.row - (active_buffer.camera_p[1] + rows_to_draw - 1);
             }
         }
+        const target_p = rl.Vector2{
+            .x = 0.0,
+            .y = @floatFromInt(active_buffer.camera_p[1] * @as(usize, @intCast(refrence_glyph_info.image.height))),
+        };
 
         // Lerp camera to target pos
         if (rl.Vector2Equals(camera.target, target_p) == 0) {
@@ -1078,10 +1013,10 @@ pub fn main() !void {
                 @max(1, active_buffer_line_count) - 1,
                 @as(usize, @intFromFloat(@divExact(
                     @max(0.0, @round(camera.target.y)),
-                    @as(f32, @floatFromInt(font.baseSize)),
+                    @as(f32, @floatFromInt(refrence_glyph_info.image.height)),
                 ))),
             );
-            const end_camera_row = @min(active_buffer_line_count, start_camera_row + rows + 2);
+            const end_camera_row = @min(active_buffer_line_count, start_camera_row + rows_to_draw);
 
             var line_index: usize = 0;
             var current_line = active_buffer.lines.first;
@@ -1097,7 +1032,7 @@ pub fn main() !void {
                     break;
 
                 var x_offset: c_int = 0;
-                var y_offset: c_int = @intCast(line_index * @as(usize, @intCast(font.baseSize)));
+                var y_offset: c_int = @intCast(line_index * @as(usize, @intCast(refrence_glyph_info.image.height)));
 
                 // Line numbers
                 var temp_arena = heap.ArenaAllocator.init(scratch_arena.allocator());
@@ -1116,7 +1051,7 @@ pub fn main() !void {
                             .x = @floatFromInt(x_offset),
                             .y = @floatFromInt(y_offset),
                         },
-                        @floatFromInt(font.baseSize),
+                        @floatFromInt(refrence_glyph_info.image.height),
                         rl.WHITE,
                     );
                     DEBUG_glyphs_drawn_this_frame += 1;
@@ -1136,12 +1071,12 @@ pub fn main() !void {
                                     .x = @floatFromInt(x_offset),
                                     .y = @floatFromInt(y_offset),
                                 },
-                                @floatFromInt(font.baseSize),
+                                @floatFromInt(refrence_glyph_info.image.height),
                                 rl.RED,
                             );
                             DEBUG_glyphs_drawn_this_frame += 1;
                         }
-                        y_offset += font.baseSize;
+                        y_offset += refrence_glyph_info.image.height;
                         x_offset = refrence_glyph_info.image.width * 5;
                         continue;
                     }
@@ -1156,7 +1091,7 @@ pub fn main() !void {
                             .x = @floatFromInt(x_offset),
                             .y = @floatFromInt(y_offset),
                         },
-                        @floatFromInt(font.baseSize),
+                        @floatFromInt(refrence_glyph_info.image.height),
                         rl.WHITE,
                     );
                     DEBUG_glyphs_drawn_this_frame += 1;
@@ -1170,9 +1105,9 @@ pub fn main() !void {
                 '~',
                 .{
                     .x = @floatFromInt(refrence_glyph_info.image.width * 3),
-                    .y = @floatFromInt(end_camera_row * @as(usize, @intCast(font.baseSize))),
+                    .y = @floatFromInt(end_camera_row * @as(usize, @intCast(refrence_glyph_info.image.height))),
                 },
-                @floatFromInt(font.baseSize),
+                @floatFromInt(refrence_glyph_info.image.height),
                 rl.WHITE,
             );
         }
@@ -1190,7 +1125,7 @@ pub fn main() !void {
             @as(c_int, @intFromFloat(0.0)),
             @as(c_int, @intFromFloat(cursor_p.y)),
             @as(c_int, @intCast(cols)) * refrence_glyph_info.image.width,
-            font.baseSize,
+            refrence_glyph_info.image.height,
             rl.Color{ .r = 255, .g = 255, .b = 255, .a = 20 },
         );
 
@@ -1200,7 +1135,7 @@ pub fn main() !void {
                 @as(c_int, @intFromFloat(cursor_p.x)),
                 @as(c_int, @intFromFloat(cursor_p.y)),
                 refrence_glyph_info.image.width,
-                font.baseSize,
+                refrence_glyph_info.image.height,
                 rl.Color{ .r = 255, .g = 255, .b = 255, .a = 128 },
             );
         } else if (mode == .insert) { // Line
@@ -1208,7 +1143,7 @@ pub fn main() !void {
                 cursor_p,
                 rl.Vector2{
                     .x = cursor_p.x,
-                    .y = cursor_p.y + @as(f32, @floatFromInt(font.baseSize)),
+                    .y = cursor_p.y + @as(f32, @floatFromInt(refrence_glyph_info.image.height)),
                 },
                 2.0,
                 rl.Color{ .r = 255, .g = 255, .b = 255, .a = 128 },
@@ -1217,11 +1152,11 @@ pub fn main() !void {
             rl.DrawLineEx(
                 rl.Vector2{
                     .x = cursor_p.x,
-                    .y = cursor_p.y + @as(f32, @floatFromInt(font.baseSize)),
+                    .y = cursor_p.y + @as(f32, @floatFromInt(refrence_glyph_info.image.height)),
                 },
                 rl.Vector2{
                     .x = cursor_p.x + @as(f32, @floatFromInt(refrence_glyph_info.image.width)),
-                    .y = cursor_p.y + @as(f32, @floatFromInt(font.baseSize)),
+                    .y = cursor_p.y + @as(f32, @floatFromInt(refrence_glyph_info.image.height)),
                 },
                 2.0,
                 rl.Color{ .r = 255, .g = 255, .b = 255, .a = 128 },
@@ -1230,12 +1165,7 @@ pub fn main() !void {
 
         // Draw selection
         if (mode == .select) { // FIXME(caleb): Only draw selections that can be seen
-            // const cursor_point = charNodeFromCoords(
-            //     &active_buffer.lines,
-            //     active_buffer.cursor_coords,
-            // );
             const cursor_point = 0;
-            // const selection_point = charNodeFromCoords(&active_buffer.lines, active_buffer.selection_coords);
             const selection_point = 0;
             const start_point_index = @min(cursor_point, selection_point);
             const end_point_index = @max(cursor_point, selection_point);
@@ -1245,66 +1175,121 @@ pub fn main() !void {
             var y_offset: c_int = 0;
             if (start_point_index == cursor_point) {
                 x_offset = @as(c_int, @intCast(active_buffer.cursor_coords.col)) * refrence_glyph_info.image.width + refrence_glyph_info.image.width * 5;
-                y_offset = @as(c_int, @intCast(active_buffer.cursor_coords.row)) * font.baseSize;
+                y_offset = @as(c_int, @intCast(active_buffer.cursor_coords.row)) * refrence_glyph_info.image.height;
             } else {
                 x_offset = @as(c_int, @intCast(active_buffer.selection_coords.col)) * refrence_glyph_info.image.width + refrence_glyph_info.image.width * 5;
-                y_offset = @as(c_int, @intCast(active_buffer.selection_coords.row)) * font.baseSize;
+                y_offset = @as(c_int, @intCast(active_buffer.selection_coords.row)) * refrence_glyph_info.image.height;
             }
-
-            // for (active_buffer.points.items[start_point_index .. end_point_index + 1]) |point| {
-            //     rl.DrawRectangle(
-            //         x_offset,
-            //         y_offset,
-            //         refrence_glyph_info.image.width,
-            //         font.baseSize,
-            //         rl.Color{ .r = 255, .g = 0xa5, .b = 0x00, .a = 128 },
-            //     );
-
-            //     if (point == '\n') {
-            //         y_offset += font.baseSize;
-            //         x_offset = refrence_glyph_info.image.width * 4;
-            //     }
-            //     if (point == '\t') {
-            //         x_offset += refrence_glyph_info.image.width * 4;
-            //     } else {
-            //         x_offset += refrence_glyph_info.image.width;
-            //     }
-            // }
         }
 
         rl.EndMode2D();
 
-        // Draw command buffer
+        // Draw status bar
+        {
+            var temp_arena = heap.ArenaAllocator.init(scratch_arena.allocator());
+            defer _ = temp_arena.reset(.free_all);
+
+            rl.DrawRectangle(
+                0,
+                refrence_glyph_info.image.height * @as(c_int, @intCast(rows - 2)),
+                @as(c_int, @intCast(cols)) * refrence_glyph_info.image.width,
+                refrence_glyph_info.image.height,
+                background_color,
+            );
+            rl.DrawTextCodepoints(
+                font,
+                @ptrCast(mode_strs[@intFromEnum(mode)]),
+                3,
+                .{ .x = 0, .y = @floatFromInt(refrence_glyph_info.image.height * @as(c_int, @intCast(rows - 2))) },
+                @floatFromInt(font_size),
+                0.0,
+                rl.WHITE,
+            );
+
+            //- cabarger: Buffer name
+            const mode_str_dim = rl.MeasureTextEx(font, @ptrCast("NOR"), @floatFromInt(font_size), 0.0);
+            const buffer_name = try temp_arena.allocator().alloc(c_int, active_buffer.file_path.len);
+            for (active_buffer.file_path, 0..) |char, char_index| {
+                buffer_name[char_index] = @intCast(char);
+            }
+            rl.DrawTextCodepoints(
+                font,
+                @ptrCast(buffer_name),
+                @intCast(buffer_name.len),
+                .{
+                    .x = mode_str_dim.x + @as(f32, @floatFromInt(refrence_glyph_info.image.width)),
+                    .y = @floatFromInt(refrence_glyph_info.image.height * @as(c_int, @intCast(rows - 2))),
+                },
+                @floatFromInt(font_size),
+                0.0,
+                rl.WHITE,
+            );
+
+            //- cabarger: Cursor coords
+            const cursor_coords_str_u8 = try std.fmt.allocPrint(
+                temp_arena.allocator(),
+                "{d}:{d}",
+                .{ active_buffer.cursor_coords.row, active_buffer.cursor_coords.col },
+            );
+            const cursor_coords_str_points = try temp_arena.allocator().alloc(
+                c_int,
+                cursor_coords_str_u8.len,
+            );
+            for (cursor_coords_str_u8, 0..) |char, char_index| {
+                cursor_coords_str_points[char_index] = @intCast(char);
+            }
+            const cursor_coords_str_dim = rl.MeasureTextEx(
+                font,
+                @ptrCast(cursor_coords_str_points),
+                @floatFromInt(font_size),
+                0.0,
+            );
+
+            rl.DrawTextCodepoints(
+                font,
+                @ptrCast(cursor_coords_str_points),
+                @intCast(cursor_coords_str_points.len),
+                .{
+                    .x = @as(f32, @floatFromInt(refrence_glyph_info.image.width * @as(c_int, @intCast(cols)))) - cursor_coords_str_dim.x * 10.0,
+                    .y = @floatFromInt(refrence_glyph_info.image.height * @as(c_int, @intCast(rows - 2))),
+                },
+                @floatFromInt(font_size),
+                0.0,
+                rl.WHITE,
+            );
+        }
+
+        //- cabarger: Draw command buffer
         if (mode == .command) {
             rl.DrawRectangle(
                 0,
-                font.baseSize * @as(c_int, @intCast(rows - 1)),
+                refrence_glyph_info.image.height * @as(c_int, @intCast(rows - 1)),
                 @as(c_int, @intCast(cols)) * refrence_glyph_info.image.width,
-                font.baseSize,
-                rl.Color{ .r = 0, .g = 0, .b = 0, .a = 255 },
+                refrence_glyph_info.image.height,
+                background_color,
             );
 
             rl.DrawTextCodepoint(font, ':', .{
                 .x = 0,
-                .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(rows - 1))),
-            }, @floatFromInt(font.baseSize), rl.WHITE);
+                .y = @floatFromInt(refrence_glyph_info.image.height * @as(c_int, @intCast(rows - 1))),
+            }, @floatFromInt(refrence_glyph_info.image.height), rl.WHITE);
             DEBUG_glyphs_drawn_this_frame += 1;
 
             var x_offset: c_int = refrence_glyph_info.image.width;
             for (command_points.items) |point| {
                 rl.DrawTextCodepoint(font, point, .{
                     .x = @floatFromInt(x_offset),
-                    .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(rows - 1))),
-                }, @floatFromInt(font.baseSize), rl.WHITE);
+                    .y = @floatFromInt(refrence_glyph_info.image.height * @as(c_int, @intCast(rows - 1))),
+                }, @floatFromInt(refrence_glyph_info.image.height), rl.WHITE);
                 DEBUG_glyphs_drawn_this_frame += 1;
                 x_offset += refrence_glyph_info.image.width;
             }
 
             rl.DrawRectangle(
                 refrence_glyph_info.image.width * @as(c_int, @intCast(command_points_index + 1)),
-                font.baseSize * @as(c_int, @intCast(rows - 1)),
+                refrence_glyph_info.image.height * @as(c_int, @intCast(rows - 1)),
                 refrence_glyph_info.image.width,
-                font.baseSize,
+                refrence_glyph_info.image.height,
                 rl.Color{
                     .r = 255,
                     .g = 255,
@@ -1312,13 +1297,9 @@ pub fn main() !void {
                     .a = 128,
                 },
             );
-        } else {
-
-            //- cabarger: Draw status bar
-
         }
 
-        // Draw debug info
+        //- cabarger: Draw debug info
         if (draw_debug_info) {
             var temp_arena = heap.ArenaAllocator.init(scratch_arena.allocator());
             defer _ = temp_arena.reset(.free_all);
@@ -1329,33 +1310,17 @@ pub fn main() !void {
                 "glyphs drawn: {d}",
                 .{DEBUG_glyphs_drawn_this_frame},
             );
-            const cursor_coordsz = try std.fmt.allocPrintZ(
-                temp_arena.allocator(),
-                "cursor_p: ({d}, {d})",
-                .{
-                    active_buffer.cursor_coords.col,
-                    active_buffer.cursor_coords.row,
-                },
-            );
-            const line_node_countz = try std.fmt.allocPrintZ(
-                temp_arena.allocator(),
-                "lines: {d}",
-                .{
-                    active_buffer.lines.len,
-                },
-            );
             for (&[_][:0]const u8{
                 fpsz,
                 glyph_draw_countz,
-                cursor_coordsz,
-                line_node_countz,
             }, 0..) |textz, debug_text_index| {
                 rl.DrawTextEx(font, textz, .{
                     .x = @floatFromInt(@divFloor(@as(c_int, @intCast(cols)) * refrence_glyph_info.image.width, 4) * 3),
-                    .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * font.baseSize, 10) * 8 + font.baseSize * @as(c_int, @intCast(debug_text_index))),
-                }, @floatFromInt(font.baseSize), 0, rl.RED);
+                    .y = @floatFromInt(@divFloor(@as(c_int, @intCast(rows)) * refrence_glyph_info.image.height, 10) * 8 + refrence_glyph_info.image.height * @as(c_int, @intCast(debug_text_index))),
+                }, @floatFromInt(refrence_glyph_info.image.height), 0, rl.RED);
             }
         }
+
         rl.EndDrawing();
     }
     rl.CloseWindow();
