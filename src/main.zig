@@ -179,6 +179,9 @@ fn bufferLoadFile(
     buffer.active = true; //- cabarger: I don't know where this should happen... Here is fine for now.
 }
 
+// fn updateCameraFromCursorP() void {
+// }
+
 fn bufferWriteToDisk(buffer: *Buffer) !void {
     var f = try std.fs.cwd().createFile(buffer.file_path, .{});
     defer f.close();
@@ -236,21 +239,6 @@ inline fn isValidCursorP(
 const shift_width = 4;
 const default_font_size = 25;
 
-fn bufferCharNodeFromLineNode(
-    buffer: *Buffer,
-    line_node: *TailQueue(TailQueue(u8)).Node,
-) *TailQueue(u8).Node {
-    var result: ?*TailQueue(u8).Node = null;
-    result = line_node.data.first;
-    var char_node_index: usize = 0;
-    while (result != null) : (result = result.?.next) {
-        if (char_node_index == buffer.cursor_coords.col)
-            return result.?;
-        char_node_index += 1;
-    }
-    unreachable;
-}
-
 fn charNodeFromLineAndCol(
     line_node: *TailQueue(TailQueue(u8)).Node,
     col: usize,
@@ -263,17 +251,6 @@ fn charNodeFromLineAndCol(
         char_node_index += 1;
     }
     return &nil_char_node;
-}
-
-inline fn bufferLineNode(buffer: *Buffer) *TailQueue(TailQueue(u8)).Node {
-    var result = buffer.lines.first;
-    var line_index: usize = 0;
-    while (result != null) : (result = result.?.next) {
-        if (line_index == buffer.cursor_coords.row)
-            return result orelse unreachable;
-        line_index += 1;
-    }
-    unreachable;
 }
 
 inline fn lineNodeFromRow(
@@ -307,10 +284,6 @@ inline fn cursorLeft(
     lines: *TailQueue(TailQueue(u8)),
     p: @Vector(2, usize),
 ) BufferCoords {
-
-    if (isVali
-
-    
     var result: @Vector(2, isize) = @intCast(p);
     if (isValidCursorP(lines, result - @Vector(2, isize){ 1, 0 })) {
         result[0] -= 1;
@@ -350,47 +323,46 @@ fn bufferRemoveCharAt(buffer: *Buffer, cursor_coords: BufferCoords) void {
         current_line_node,
         cursor_coords.col,
     );
+    if (char_node.data != 0) {
+        //- cabarger: Do stuff because we are removing a new line
+        if (char_node.data == '\n') {
+            var next_line_node = current_line_node.next;
+            if (next_line_node != null) {
 
-    //- cabarger: Do stuff because we are removing a new line
-    if (char_node.data == '\n') {
-        var next_line_node = current_line_node.next;
-        if (next_line_node != null) {
+                //- cabarger: Append next lines contents to current line
+                while (next_line_node.?.data.popFirst()) |next_line_char_node|
+                    current_line_node.data.append(next_line_char_node);
 
-            //- cabarger: Append next lines contents to current line
-            while (next_line_node.?.data.popFirst()) |next_line_char_node|
-                current_line_node.data.append(next_line_char_node);
-
-            //- Remove next line
-            buffer.lines.remove(next_line_node.?);
-            buffer.line_nodes_pool.destroy(next_line_node.?);
+                //- Remove next line
+                buffer.lines.remove(next_line_node.?);
+                buffer.line_nodes_pool.destroy(next_line_node.?);
+            }
         }
-    }
 
-    //- cabarger: Remove the char
-    current_line_node.data.remove(char_node);
-    buffer.char_nodes_pool.destroy(char_node);
+        //- cabarger: Remove the char
+        current_line_node.data.remove(char_node);
+        buffer.char_nodes_pool.destroy(char_node);
 
-    //- cabarger: Is THIS line empty? If so remove it.
-    if (current_line_node.data.first == null) {
-        buffer.lines.remove(current_line_node);
-        buffer.line_nodes_pool.destroy(current_line_node);
+        //- cabarger: Is THIS line empty? If so remove it.
+        if (current_line_node.data.first == null) {
+            buffer.lines.remove(current_line_node);
+            buffer.line_nodes_pool.destroy(current_line_node);
+        }
     }
 }
 
 inline fn cursorUp(
     lines: *TailQueue(TailQueue(u8)),
-    row: usize,
-    col: usize,
+    p: @Vector(2, usize),
 ) BufferCoords {
-    var result = BufferCoords{ .row = row, .col = col };
-    var current_line_node = lineNodeFromRow(lines, row);
-    if (current_line_node.prev != null) {
-        const prior_line_len = current_line_node.prev.?.data.len;
-        if (prior_line_len <= col)
-            result.col = prior_line_len - 1;
-        result.row -= 1;
+    var result: @Vector(2, isize) = @intCast(p);
+    if (isValidCursorP(lines, result - @Vector(2, isize){ 0, 1 })) {
+        result[1] -= 1;
+    } else if (isValidCursorP(lines, @Vector(2, isize){ 0, result[1] - 1 })) {
+        var line_node = lineNodeFromRow(lines, @intCast(result[1] - 1));
+        result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] - 1) };
     }
-    return result;
+    return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
 }
 
 inline fn coordsDown(
@@ -490,6 +462,8 @@ pub fn main() !void {
         bufferInit(buffer);
     var active_buffer = buffersGetAvail(&buffers) orelse unreachable;
 
+    var last_cursor_p: BufferCoords = .{ .row = 0, .col = 0 };
+
     var command_points_index: usize = 0;
     var command_points = ArrayList(u8).init(scratch_arena.allocator());
 
@@ -512,6 +486,7 @@ pub fn main() !void {
     main_loop: while (true) {
         if (rl.WindowShouldClose())
             break;
+
         if (rl.IsWindowResized()) {
             screen_width = @intCast(rl.GetScreenWidth());
             screen_height = @intCast(rl.GetScreenHeight());
@@ -521,6 +496,8 @@ pub fn main() !void {
 
         if (rl.IsKeyPressed(rl.KEY_F1))
             draw_debug_info = !draw_debug_info;
+
+        last_cursor_p = active_buffer.cursor_coords;
 
         const alt_is_held = rl.IsKeyDown(rl.KEY_LEFT_ALT);
         const ctrl_is_held = rl.IsKeyDown(rl.KEY_LEFT_CONTROL);
@@ -563,35 +540,20 @@ pub fn main() !void {
 
                         //- cabarger: Move cursor up/down/left/right
                         else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
+                            last_cursor_p = active_buffer.cursor_coords;
                             active_buffer.cursor_coords = cursorUp(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
+                                .{
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
+                                },
                             );
-                            const cursor_p = rl.Vector2{
-                                .x = camera.target.x, // FIXME(caleb)
-                                .y = @as(f32, @floatFromInt(
-                                    active_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
-                                )),
-                            };
-                            if (cursor_p.y < camera.target.y) {
-                                target_p = rl.Vector2Subtract(target_p, .{ .x = 0, .y = @floatFromInt(font.baseSize) });
-                            }
                         } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
                             active_buffer.cursor_coords = coordsDown(
                                 &active_buffer.lines,
                                 active_buffer.cursor_coords.row,
                                 active_buffer.cursor_coords.col,
                             );
-                            const cursor_p = rl.Vector2{
-                                .x = camera.target.x, // FIXME(caleb)
-                                .y = @as(f32, @floatFromInt(
-                                    active_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
-                                )),
-                            };
-                            if (cursor_p.y > (camera.target.y + @as(f32, @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize)))))) {
-                                target_p = rl.Vector2Subtract(cursor_p, .{ .x = 0, .y = @floatFromInt((rows - 1) * @as(usize, @intCast(font.baseSize))) });
-                            }
                         } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
                             active_buffer.cursor_coords = cursorRight(
                                 &active_buffer.lines,
@@ -626,8 +588,11 @@ pub fn main() !void {
                             for (0..@divFloor(rows, 2)) |_|
                                 active_buffer.cursor_coords = cursorUp(
                                     &active_buffer.lines,
-                                    active_buffer.cursor_coords.row,
-                                    active_buffer.cursor_coords.col,
+
+                                    .{
+                                        active_buffer.cursor_coords.col,
+                                        active_buffer.cursor_coords.row,
+                                    },
                                 );
                             target_p = rl.Vector2{
                                 .x = 0.0,
@@ -651,8 +616,11 @@ pub fn main() !void {
                             for (0..rows) |_|
                                 active_buffer.cursor_coords = cursorUp(
                                     &active_buffer.lines,
-                                    active_buffer.cursor_coords.row,
-                                    active_buffer.cursor_coords.col,
+
+                                    .{
+                                        active_buffer.cursor_coords.col,
+                                        active_buffer.cursor_coords.row,
+                                    },
                                 );
                             target_p = rl.Vector2{
                                 .x = 0.0,
@@ -711,7 +679,7 @@ pub fn main() !void {
                         }
 
                         ///////////////////////////////
-                        //- cabarger: Edit dat buffer
+                        //- cabarger: Edit buffer
 
                         //- cabarger: Select entire line
                         else if (char_pressed == 'x') {
@@ -756,8 +724,6 @@ pub fn main() !void {
                                 active_buffer,
                                 active_buffer.cursor_coords,
                             );
-                            // if (active_buffer.cursor_coords.row >= active_buffer.lines.len)
-                            //     active_buffer.cursor_coords.row -= 1;
                         }
                     },
                     .insert => {
@@ -963,10 +929,12 @@ pub fn main() !void {
                         if (key_pressed == rl.KEY_CAPS_LOCK or key_pressed == rl.KEY_ESCAPE) {
                             mode = .normal;
                         } else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
-                            active_buffer.cursor_coords = cursorUp(
+                            active_buffer.selection_coords = cursorUp(
                                 &active_buffer.lines,
-                                active_buffer.cursor_coords.row,
-                                active_buffer.cursor_coords.col,
+                                .{
+                                    active_buffer.selection_coords.col,
+                                    active_buffer.selection_coords.row,
+                                },
                             );
                             const cursor_p = rl.Vector2{
                                 .x = camera.target.x, // FIXME(caleb)
@@ -1054,6 +1022,29 @@ pub fn main() !void {
 
             key_pressed = rl.GetKeyPressed();
             char_pressed = @intCast(rl.GetCharPressed());
+        }
+
+        //- cabarger: Update camera on cursor move.
+        if ((last_cursor_p.row != active_buffer.cursor_coords.row) or
+            (last_cursor_p.col != active_buffer.cursor_coords.col))
+        {
+            const cursor_p = rl.Vector2{
+                .x = 0,
+                .y = @as(f32, @floatFromInt(
+                    active_buffer.cursor_coords.row * @as(usize, @intCast(font.baseSize)),
+                )),
+            };
+            if (cursor_p.y < camera.target.y) {
+                target_p = rl.Vector2{
+                    .x = 0.0,
+                    .y = @floatFromInt(font.baseSize * @as(c_int, @intCast(active_buffer.cursor_coords.row))),
+                };
+            } else if (cursor_p.y > (camera.target.y + @as(f32, @floatFromInt((rows) * @as(usize, @intCast(font.baseSize)))))) {
+                target_p = rl.Vector2Subtract(cursor_p, .{
+                    .x = 0,
+                    .y = @floatFromInt((rows) * @as(usize, @intCast(font.baseSize))),
+                });
+            }
         }
 
         // Lerp camera to target pos
