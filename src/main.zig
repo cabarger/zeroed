@@ -35,7 +35,7 @@ const TCTX = base_thread_context.TCTX;
 const ArrayList = std.ArrayList;
 const TailQueue = std.TailQueue;
 
-const background_color = rl.Color{ .r = 10, .g = 10, .b = 10, .a = 255 };
+const background_color = rl.Color{ .r = 30, .g = 30, .b = 30, .a = 255 };
 
 const mode_strs = [_][]const c_int{
     &[_]c_int{ 'N', 'O', 'R' },
@@ -243,7 +243,7 @@ inline fn isValidCursorP(
 }
 
 const shift_width = 4;
-const default_font_size = 25;
+const default_font_size = 20;
 
 fn charNodeFromLineAndCol(
     line_node: *TailQueue(TailQueue(u8)).Node,
@@ -561,10 +561,13 @@ pub fn main() !void {
                                 },
                             );
                         } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
-                            active_buffer.cursor_coords = cursorRight(&active_buffer.lines, .{
-                                active_buffer.cursor_coords.col,
-                                active_buffer.cursor_coords.row,
-                            });
+                            active_buffer.cursor_coords = cursorRight(
+                                &active_buffer.lines,
+                                .{
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
+                                },
+                            );
                         } else if (key_pressed == rl.KEY_LEFT or char_pressed == 'h') {
                             active_buffer.cursor_coords = cursorLeft(
                                 &active_buffer.lines,
@@ -908,28 +911,28 @@ pub fn main() !void {
                                 },
                             );
                         } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
-                            active_buffer.cursor_coords = cursorDown(
+                            active_buffer.selection_coords = cursorDown(
                                 &active_buffer.lines,
                                 .{
-                                    active_buffer.cursor_coords.col,
-                                    active_buffer.cursor_coords.row,
+                                    active_buffer.selection_coords.col,
+                                    active_buffer.selection_coords.row,
                                 },
                             );
                         } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
-                            active_buffer.cursor_coords = cursorRight(
+                            active_buffer.selection_coords = cursorRight(
                                 &active_buffer.lines,
                                 .{
-                                    active_buffer.cursor_coords.col,
-                                    active_buffer.cursor_coords.row,
+                                    active_buffer.selection_coords.col,
+                                    active_buffer.selection_coords.row,
                                 },
                             );
                         } else if (key_pressed == rl.KEY_LEFT or char_pressed == 'h') {
-                            active_buffer.cursor_coords = cursorLeft(
+                            active_buffer.selection_coords = cursorLeft(
                                 &active_buffer.lines,
 
                                 .{
-                                    active_buffer.cursor_coords.col,
-                                    active_buffer.cursor_coords.row,
+                                    active_buffer.selection_coords.col,
+                                    active_buffer.selection_coords.row,
                                 },
                             );
                         }
@@ -1164,22 +1167,20 @@ pub fn main() !void {
         }
 
         // Draw selection
-        if (mode == .select) { // FIXME(caleb): Only draw selections that can be seen
-            const cursor_point = 0;
-            const selection_point = 0;
-            const start_point_index = @min(cursor_point, selection_point);
-            const end_point_index = @max(cursor_point, selection_point);
-            _ = end_point_index;
-
+        if (mode == .select) { //- TODO(caleb): Only draw selections that can be seen
             var x_offset: c_int = 0;
             var y_offset: c_int = 0;
-            if (start_point_index == cursor_point) {
-                x_offset = @as(c_int, @intCast(active_buffer.cursor_coords.col)) * refrence_glyph_info.image.width + refrence_glyph_info.image.width * 5;
-                y_offset = @as(c_int, @intCast(active_buffer.cursor_coords.row)) * refrence_glyph_info.image.height;
-            } else {
-                x_offset = @as(c_int, @intCast(active_buffer.selection_coords.col)) * refrence_glyph_info.image.width + refrence_glyph_info.image.width * 5;
-                y_offset = @as(c_int, @intCast(active_buffer.selection_coords.row)) * refrence_glyph_info.image.height;
-            }
+
+            x_offset = @as(c_int, @intCast(active_buffer.cursor_coords.col)) * refrence_glyph_info.image.width + refrence_glyph_info.image.width * 5;
+            y_offset = @as(c_int, @intCast(active_buffer.cursor_coords.row)) * refrence_glyph_info.image.height;
+
+            rl.DrawRectangle(
+                x_offset,
+                y_offset,
+                refrence_glyph_info.image.width * @as(c_int, @intCast(active_buffer.selection_coords.col)),
+                refrence_glyph_info.image.height,
+                rl.Color{ .r = 0, .g = 255, .b = 255, .a = 128 },
+            );
         }
 
         rl.EndMode2D();
