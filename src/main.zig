@@ -51,7 +51,7 @@ const Mode = enum(u8) {
     select,
 };
 
-const BufferCoords = struct {
+const BufferCoords = packed struct {
     row: usize,
     col: usize,
 };
@@ -437,7 +437,20 @@ inline fn indentChars(
     }
 }
 
+const log = std.log;
+
 pub fn main() !void {
+    runEditor() catch |err| {
+        log.err("Program error: {}\n", .{err});
+        if (@errorReturnTrace()) |trace| {
+            std.debug.dumpStackTrace(trace.*);
+        }
+        std.debug.print("EXITING!!!\n", .{});
+        std.os.exit(1);
+    };
+}
+
+pub fn runEditor() !void {
     var screen_width: usize = 800;
     var screen_height: usize = 600;
 
@@ -903,58 +916,57 @@ pub fn main() !void {
                         if (key_pressed == rl.KEY_CAPS_LOCK or key_pressed == rl.KEY_ESCAPE) {
                             mode = .normal;
                         } else if (key_pressed == rl.KEY_UP or char_pressed == 'k') {
-                            active_buffer.selection_coords = cursorUp(
+                            active_buffer.cursor_coords = cursorUp(
                                 &active_buffer.lines,
                                 .{
-                                    active_buffer.selection_coords.col,
-                                    active_buffer.selection_coords.row,
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
                                 },
                             );
                         } else if (key_pressed == rl.KEY_DOWN or char_pressed == 'j') {
-                            active_buffer.selection_coords = cursorDown(
+                            active_buffer.cursor_coords = cursorDown(
                                 &active_buffer.lines,
                                 .{
-                                    active_buffer.selection_coords.col,
-                                    active_buffer.selection_coords.row,
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
                                 },
                             );
                         } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
-                            active_buffer.selection_coords = cursorRight(
+                            active_buffer.cursor_coords = cursorRight(
                                 &active_buffer.lines,
                                 .{
-                                    active_buffer.selection_coords.col,
-                                    active_buffer.selection_coords.row,
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
                                 },
                             );
                         } else if (key_pressed == rl.KEY_LEFT or char_pressed == 'h') {
-                            active_buffer.selection_coords = cursorLeft(
+                            active_buffer.cursor_coords = cursorLeft(
                                 &active_buffer.lines,
 
                                 .{
-                                    active_buffer.selection_coords.col,
-                                    active_buffer.selection_coords.row,
+                                    active_buffer.cursor_coords.col,
+                                    active_buffer.cursor_coords.row,
                                 },
                             );
                         }
 
                         if (char_pressed == 'x') {
-                            active_buffer.selection_coords.col = 0;
-                            active_buffer.selection_coords.row = active_buffer.cursor_coords.row;
+                            active_buffer.cursor_coords.col = 0;
+                            active_buffer.cursor_coords.row = active_buffer.cursor_coords.row;
                         } else if (char_pressed == 'd') {
-                            const selection_coords_point_index = 0;
                             const cursor_coords_point_index = 0;
 
                             var selection_start: BufferCoords = undefined;
                             var start_point_index: usize = undefined;
                             var end_point_index: usize = undefined;
 
-                            if (cursor_coords_point_index < selection_coords_point_index) {
+                            if (cursor_coords_point_index < cursor_coords_point_index) {
                                 selection_start = active_buffer.cursor_coords;
                                 start_point_index = cursor_coords_point_index;
-                                end_point_index = selection_coords_point_index;
+                                end_point_index = cursor_coords_point_index;
                             } else {
-                                selection_start = active_buffer.selection_coords;
-                                start_point_index = selection_coords_point_index;
+                                selection_start = active_buffer.cursor_coords;
+                                start_point_index = cursor_coords_point_index;
                                 end_point_index = cursor_coords_point_index;
                             }
                             active_buffer.cursor_coords = selection_start;
@@ -1019,7 +1031,7 @@ pub fn main() !void {
                     @as(f32, @floatFromInt(refrence_glyph_info.image.height)),
                 ))),
             );
-            const end_camera_row = @min(active_buffer_line_count, start_camera_row + rows_to_draw);
+            const end_camera_row = @min(active_buffer_line_count, start_camera_row + rows_to_draw + 1);
 
             var line_index: usize = 0;
             var current_line = active_buffer.lines.first;
@@ -1171,16 +1183,48 @@ pub fn main() !void {
             var x_offset: c_int = 0;
             var y_offset: c_int = 0;
 
-            x_offset = @as(c_int, @intCast(active_buffer.cursor_coords.col)) * refrence_glyph_info.image.width + refrence_glyph_info.image.width * 5;
-            y_offset = @as(c_int, @intCast(active_buffer.cursor_coords.row)) * refrence_glyph_info.image.height;
+            var start_p: @Vector(2, usize) = @bitCast(active_buffer.cursor_coords);
+            var end_p: @Vector(2, usize) = @bitCast(active_buffer.selection_coords);
 
-            rl.DrawRectangle(
-                x_offset,
-                y_offset,
-                refrence_glyph_info.image.width * @as(c_int, @intCast(active_buffer.selection_coords.col)),
-                refrence_glyph_info.image.height,
-                rl.Color{ .r = 0, .g = 255, .b = 255, .a = 128 },
-            );
+            var start_row = start_p[0];
+            var end_row = end_p[0];
+            var start_col = start_p[1];
+            var end_col = end_p[1];
+            {
+                if (start_p[0] > end_p[0]) {
+                    const tmp = end_row;
+                    end_row = start_row;
+                    start_row = tmp;
+                }
+                if (start_p[1] > end_p[1]) {
+                    const tmp = end_col;
+                    end_col = start_col;
+                    start_col = tmp;
+                }
+            }
+
+            x_offset = @as(c_int, @intCast(start_col)) * refrence_glyph_info.image.width + refrence_glyph_info.image.width * 5;
+            y_offset = @as(c_int, @intCast(start_row)) * refrence_glyph_info.image.height;
+
+            for (0..(end_row - start_row) + 1) |row_count| {
+                const is_last_row = row_count == end_row - start_row;
+
+                var selection_width = if (is_last_row)
+                    refrence_glyph_info.image.width * @as(c_int, @intCast((end_col - start_col) + 1))
+                else
+                    refrence_glyph_info.image.width * @as(c_int, @intCast(lineNodeFromRow(
+                        &active_buffer.lines,
+                        start_row + row_count,
+                    ).data.len));
+
+                rl.DrawRectangle(
+                    x_offset,
+                    y_offset + refrence_glyph_info.image.height * @as(c_int, @intCast(row_count)),
+                    selection_width,
+                    refrence_glyph_info.image.height,
+                    rl.Color{ .r = 255, .g = 255, .b = 255, .a = 128 },
+                );
+            }
         }
 
         rl.EndMode2D();
@@ -1194,7 +1238,7 @@ pub fn main() !void {
                 0,
                 refrence_glyph_info.image.height * @as(c_int, @intCast(rows - 2)),
                 @as(c_int, @intCast(cols)) * refrence_glyph_info.image.width,
-                refrence_glyph_info.image.height,
+                refrence_glyph_info.image.height * 2,
                 background_color,
             );
             rl.DrawTextCodepoints(
