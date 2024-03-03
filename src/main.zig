@@ -35,8 +35,12 @@ const TCTX = base_thread_context.TCTX;
 const ArrayList = std.ArrayList;
 const TailQueue = std.TailQueue;
 
+const Buffer = @import("Buffer.zig");
+
 const Vec2U32 = @Vector(2, u32);
 const Vec2I32 = @Vector(2, i32);
+
+const default_font_size = 20;
 
 const background_color = rl.Color{ .r = 30, .g = 30, .b = 30, .a = 255 };
 
@@ -54,174 +58,11 @@ const Mode = enum(u8) {
     select,
 };
 
-const BufferCoords = packed struct {
-    col: usize,
-    row: usize,
-};
+const BufferCoords = Buffer.BufferCoords;
 
 //- NOTE(cabarger): Play around with this type alias...
 // I'll probably change it later.
 const BufferLine = TailQueue(TailQueue(u8)).Node;
-
-const Buffer = struct {
-    arena: heap.ArenaAllocator,
-
-    camera_p: @Vector(2, usize),
-    selection_coords: BufferCoords,
-    cursor_coords: BufferCoords,
-
-    line_nodes_pool: heap.MemoryPool(TailQueue(TailQueue(u8)).Node),
-    char_nodes_pool: heap.MemoryPool(TailQueue(u8).Node),
-
-    lines: TailQueue(TailQueue(u8)),
-
-    backed_by_file: bool,
-    file_path_buf: [256]u8,
-    file_path: []const u8,
-
-    needs_write: bool,
-    modified_time: f64,
-
-    active: bool, //- cabarger: Probably can infer this? Also rename this... Possibly loaded or open?
-
-    inline fn cursorRight(
-        buffer: *Buffer,
-        p: @Vector(2, usize),
-    ) BufferCoords {
-        var result: @Vector(2, isize) = @intCast(p);
-        if (buffer.isValidCursorP(result + @Vector(2, isize){ 1, 0 })) {
-            result[0] += 1;
-        } else if (buffer.isValidCursorP(@Vector(2, isize){ 0, result[1] + 1 })) {
-            result = .{ 0, result[1] + 1 };
-        }
-        return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
-    }
-
-    inline fn cursorLeft(
-        buffer: *Buffer,
-        p: @Vector(2, usize),
-    ) BufferCoords {
-        var result: @Vector(2, isize) = @intCast(p);
-        if (buffer.isValidCursorP(result - @Vector(2, isize){ 1, 0 })) {
-            result[0] -= 1;
-        } else if (buffer.isValidCursorP(@Vector(2, isize){ 0, result[1] - 1 })) {
-            var line_node = buffer.lineFromCursorRow(@intCast(result[1] - 1));
-            result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] - 1) };
-        }
-        return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
-    }
-
-    inline fn cursorUp(
-        buffer: *Buffer,
-        p: @Vector(2, usize),
-    ) BufferCoords {
-        var result: @Vector(2, isize) = @intCast(p);
-        if (buffer.isValidCursorP(result - @Vector(2, isize){ 0, 1 })) {
-            result[1] -= 1;
-        } else if (buffer.isValidCursorP(@Vector(2, isize){ 0, result[1] - 1 })) {
-            var line_node = buffer.lineFromCursorRow(@intCast(result[1] - 1));
-            result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] - 1) };
-        }
-        return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
-    }
-
-    inline fn cursorDown(
-        buffer: *Buffer,
-        p: @Vector(2, usize),
-    ) BufferCoords {
-        var result: @Vector(2, isize) = @intCast(p);
-        if (buffer.isValidCursorP(result + @Vector(2, isize){ 0, 1 })) {
-            result[1] += 1;
-        } else if (buffer.isValidCursorP(@Vector(2, isize){ 0, result[1] + 1 })) {
-            var line_node = buffer.lineFromCursorRow(@intCast(result[1] + 1));
-            result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] + 1) };
-        }
-        return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
-    }
-
-    pub fn cursorMove(buffer: *Buffer, cursor_delta: Vec2I32) void {
-        const component_wise_is_positive = cursor_delta >= Vec2I32{ 0, 0 };
-        for (0..@as(usize, @intCast(math.absInt(cursor_delta[0]) catch unreachable))) |_| {
-            buffer.cursor_coords = if (component_wise_is_positive[0])
-                buffer.cursorRight(@bitCast(buffer.cursor_coords))
-            else
-                buffer.cursorLeft(@bitCast(buffer.cursor_coords));
-        }
-        for (0..@as(usize, @intCast(math.absInt(cursor_delta[1]) catch unreachable))) |_| {
-            buffer.cursor_coords = if (component_wise_is_positive[1])
-                buffer.cursorDown(@bitCast(buffer.cursor_coords))
-            else
-                buffer.cursorUp(@bitCast(buffer.cursor_coords));
-        }
-    }
-
-    pub inline fn isValidCursorP(buffer: *Buffer, p: @Vector(2, isize)) bool {
-        var result = false;
-        if (@reduce(.And, (p >= @Vector(2, isize){ 0, 0 }))) {
-            var line_node = buffer.lineFromCursorRow(@intCast(p[1]));
-            var char_node = charNodeFromLineAndCol(line_node, @intCast(p[0]));
-            result = (char_node.data != 0);
-        }
-        return result;
-    }
-
-    pub fn lineFromCursorRow(buffer: *Buffer, row: usize) *BufferLine {
-        var result = buffer.lines.first;
-        var line_index: usize = 0;
-        while (result != null) : (result = result.?.next) {
-            if (line_index == row)
-                return result.?;
-            line_index += 1;
-        }
-        return &nil_line_node;
-    }
-
-    pub fn currentLine(buffer: *Buffer) *BufferLine {
-        return buffer.lineFromCursorRow(buffer.cursor_coords.row);
-    }
-};
-
-fn bufferInit(buffer: *Buffer) void {
-    buffer.arena = heap.ArenaAllocator.init(heap.page_allocator);
-
-    buffer.line_nodes_pool =
-        heap.MemoryPool(TailQueue(TailQueue(u8)).Node)
-        .init(buffer.arena.allocator());
-
-    buffer.char_nodes_pool =
-        heap.MemoryPool(TailQueue(u8).Node)
-        .init(buffer.arena.allocator());
-
-    buffer.lines = .{};
-
-    buffer.cursor_coords = .{
-        .row = 0,
-        .col = 0,
-    };
-    buffer.selection_coords = .{
-        .row = 0,
-        .col = 0,
-    };
-    buffer.backed_by_file = false;
-    buffer.file_path_buf = undefined;
-    buffer.file_path = undefined;
-    buffer.needs_write = false;
-    buffer.modified_time = 0.0;
-    buffer.active = false;
-}
-
-fn bufferReset(buffer: *Buffer) void {
-    buffer.line_nodes_pool.reset();
-    buffer.char_nodes_pool.reset();
-    buffer.backed_by_file = false;
-    buffer.file_path = undefined;
-    buffer.needs_write = false;
-    buffer.modified_time = 0.0;
-    buffer.camera_p = .{ 0, 0 };
-    buffer.cursor_coords = .{ .row = 0, .col = 0 };
-    buffer.selection_coords = .{ .row = 0, .col = 0 };
-    buffer.active = false;
-}
 
 fn DEBUGPrintLine(line_node: *TailQueue(TailQueue(u8)).Node) void {
     var current_char_node = line_node.data.first;
@@ -231,174 +72,7 @@ fn DEBUGPrintLine(line_node: *TailQueue(TailQueue(u8)).Node) void {
     std.debug.print("\n", .{});
 }
 
-// NOTE(caleb): It's a bug to write to either of these, is there a way to make them
-// read only??
-var nil_char_node = TailQueue(u8).Node{
-    .prev = null,
-    .next = null,
-    .data = 0,
-};
-var nil_line_node = TailQueue(TailQueue(u8)).Node{
-    .next = null,
-    .prev = null,
-    .data = TailQueue(u8){},
-};
-
-fn bufferNewCharNode(buffer: *Buffer, char: u8) *TailQueue(u8).Node {
-    var char_node = buffer.char_nodes_pool.create() catch return @constCast(&nil_char_node);
-    char_node.data = char;
-    char_node.next = null;
-    return char_node;
-}
-
-fn bufferLoadFile(
-    buffer: *Buffer,
-    scratch_arena: *heap.ArenaAllocator,
-    path: []const u8,
-) !void {
-    bufferReset(buffer); //- cabarger: This is a waste for the initial buffer but whatever.
-    _ = scratch_arena;
-    var f = try std.fs.cwd().createFile(path, .{ .truncate = false, .read = true });
-    defer f.close();
-    var reader = f.reader();
-    {
-        var char_list = TailQueue(u8){};
-        while (reader.readByte() catch null) |byte| {
-            var char_node = try buffer.char_nodes_pool.create();
-            char_node.data = byte;
-            char_node.next = null;
-            char_list.append(char_node);
-            if (byte == '\n') {
-                var line_node = try buffer.line_nodes_pool.create();
-                line_node.data = char_list;
-                line_node.next = null;
-                buffer.lines.append(line_node);
-                char_list = TailQueue(u8){};
-            }
-        }
-        if (char_list.first != null) {
-            var line_node = try buffer.line_nodes_pool.create();
-            line_node.data = char_list;
-            buffer.lines.append(line_node);
-        }
-    }
-
-    for (path, 0..) |path_byte, path_byte_index|
-        buffer.file_path_buf[path_byte_index] = path_byte;
-    buffer.file_path = buffer.file_path_buf[0..path.len];
-    buffer.backed_by_file = true;
-
-    buffer.active = true; //- cabarger: I don't know where this should happen... Here is fine for now.
-}
-
-fn bufferWriteToDisk(buffer: *Buffer) !void {
-    var f = try std.fs.cwd().createFile(buffer.file_path, .{});
-    defer f.close();
-    var writer = f.writer();
-    var current_line_node = buffer.lines.first;
-    while (current_line_node != null) : (current_line_node = current_line_node.?.next) {
-        var current_char_node = current_line_node.?.data.first;
-        while (current_char_node != null) : (current_char_node = current_char_node.?.next)
-            try writer.writeByte(current_char_node.?.data);
-    }
-    buffer.needs_write = false;
-}
-
-fn buffersGetAvail(buffers: []Buffer) ?*Buffer {
-    for (buffers) |*buffer| {
-        if (!buffer.active) {
-            buffer.active = true;
-            return buffer;
-        }
-    }
-    return null;
-}
-
-fn buffersReleaseColdest(buffers: []Buffer) !*Buffer {
-    var coldest_buffer: *Buffer = undefined;
-    {
-        var coldest_buffer_index: usize = 0;
-        for (buffers, 0..) |*buffer, buffer_index| {
-            if (buffer.modified_time < buffers[coldest_buffer_index].modified_time) {
-                coldest_buffer_index = buffer_index;
-            }
-        }
-        coldest_buffer = &buffers[coldest_buffer_index];
-    }
-    if (coldest_buffer.backed_by_file) { //- cabarger: Possible data loss here.
-        try bufferWriteToDisk(coldest_buffer);
-    }
-    bufferReset(coldest_buffer);
-    return coldest_buffer;
-}
-
-const shift_width = 4;
-const default_font_size = 20;
-
-fn charNodeFromLineAndCol(
-    line_node: *TailQueue(TailQueue(u8)).Node,
-    col: usize,
-) *TailQueue(u8).Node {
-    var result = line_node.data.first;
-    var char_node_index: usize = 0;
-    while (result != null) : (result = result.?.next) {
-        if (char_node_index == col)
-            return result.?;
-        char_node_index += 1;
-    }
-    return &nil_char_node;
-}
-
-fn bufferInsertCharAt(buffer: *Buffer, char: u8, cursor_coords: BufferCoords) *TailQueue(u8).Node {
-    var line_node = buffer.currentLine();
-    const char_node = charNodeFromLineAndCol(
-        line_node,
-        cursor_coords.col,
-    );
-    var new_char_node = bufferNewCharNode(buffer, char);
-    line_node.data.insertBefore(char_node, new_char_node);
-
-    //- FIXME(cabarger): Check a hash on attempt to quit??
-    //- I don't like these lines sprinkled everywhere.
-    buffer.needs_write = true;
-    buffer.modified_time = rl.GetTime();
-
-    return new_char_node;
-}
-
-fn bufferRemoveCharAt(buffer: *Buffer, cursor_coords: BufferCoords) void {
-    var current_line_node = buffer.currentLine();
-    const char_node = charNodeFromLineAndCol(
-        current_line_node,
-        cursor_coords.col,
-    );
-    if (char_node.data != 0) {
-        //- cabarger: Do stuff because we are removing a new line
-        if (char_node.data == '\n') {
-            var next_line_node = current_line_node.next;
-            if (next_line_node != null) {
-
-                //- cabarger: Append next lines contents to current line
-                while (next_line_node.?.data.popFirst()) |next_line_char_node|
-                    current_line_node.data.append(next_line_char_node);
-
-                //- Remove next line
-                buffer.lines.remove(next_line_node.?);
-                buffer.line_nodes_pool.destroy(next_line_node.?);
-            }
-        }
-
-        //- cabarger: Remove the char
-        current_line_node.data.remove(char_node);
-        buffer.char_nodes_pool.destroy(char_node);
-
-        //- cabarger: Is THIS line empty? If so remove it.
-        if (current_line_node.data.first == null) {
-            buffer.lines.remove(current_line_node);
-            buffer.line_nodes_pool.destroy(current_line_node);
-        }
-    }
-}
+const log = std.log;
 
 fn cellPFromCoords(
     coords: BufferCoords,
@@ -438,22 +112,6 @@ fn cellPFromCoords(
     return cursor_p;
 }
 
-inline fn indentChars(
-    char_nodes_pool: *heap.MemoryPool(TailQueue(u8).Node),
-    char_node_list: *TailQueue(u8),
-    char_node_start: ?*TailQueue(u8).Node,
-) !void {
-    if (char_node_start != null) {
-        for (0..shift_width) |_| {
-            var char_node = try char_nodes_pool.create();
-            char_node.data = ' ';
-            char_node_list.insertBefore(char_node_start.?, char_node);
-        }
-    }
-}
-
-const log = std.log;
-
 pub fn main() !void {
     runEditor() catch |err| {
         log.err("Program error: {}\n", .{err});
@@ -489,19 +147,27 @@ pub fn runEditor() !void {
 
     var mode: Mode = .normal;
 
-    //- cabarger: Store buffers out of band. Active/Inactive
+    //~ cabarger: Buffer init
+
+    //- NOTE(cabarger): Store buffers out of band. Active/Inactive????
     var buffers: [2]Buffer = undefined;
-    for (&buffers) |*buffer|
-        bufferInit(buffer);
-    var active_buffer = buffersGetAvail(&buffers) orelse unreachable;
+    var buffer_arenas = [2]heap.ArenaAllocator{
+        heap.ArenaAllocator.init(heap.page_allocator),
+        heap.ArenaAllocator.init(heap.page_allocator),
+    };
+
+    for (&buffers, 0..) |*buffer, buffer_idx|
+        buffer.* = Buffer.init(&buffer_arenas[buffer_idx]);
+
+    var active_buffer = Buffer.reserve(&buffers) orelse unreachable;
 
     var last_cursor_p: BufferCoords = .{ .row = 0, .col = 0 };
 
     var command_points_index: usize = 0;
     var command_points = ArrayList(u8).init(scratch_arena.allocator());
 
-    //- cabarger: DEBUG... Load *.zig into default buffer.
-    try bufferLoadFile(active_buffer, scratch_arena, "test_buffer.zig");
+    //- cabarger: DEBUG... Load *.zig into active buffer.
+    try active_buffer.loadFile("test_buffer.zig");
 
     var last_char_pressed: u8 = 0;
 
@@ -635,12 +301,7 @@ pub fn runEditor() !void {
 
                         //- cabarger: Indent left/right
                         else if (char_pressed == '>') {
-                            const line_node = active_buffer.currentLine();
-                            try indentChars(
-                                &active_buffer.char_nodes_pool,
-                                &line_node.data,
-                                line_node.data.first,
-                            );
+                            try active_buffer.indentLine();
                         } else if (char_pressed == '<') {
                             const line_node = active_buffer.currentLine();
 
@@ -651,7 +312,7 @@ pub fn runEditor() !void {
                                     const point = current_char_node.?.data;
                                     if (point == ' ')
                                         white_space_count += 1;
-                                    if (white_space_count == shift_width or point != ' ')
+                                    if (white_space_count == Buffer.shift_width or point != ' ')
                                         break;
                                 }
                             }
@@ -660,7 +321,7 @@ pub fn runEditor() !void {
                                     _ = line_node.data.popFirst();
                             }
                         } else if (char_pressed == 'd') {
-                            bufferRemoveCharAt(
+                            Buffer.bufferRemoveCharAt(
                                 active_buffer,
                                 active_buffer.cursor_coords,
                             );
@@ -669,7 +330,7 @@ pub fn runEditor() !void {
                     .insert => {
                         //- cabarger: Insert charcater at cursor position
                         if (char_pressed != 0) {
-                            _ = bufferInsertCharAt(
+                            _ = Buffer.bufferInsertCharAt(
                                 active_buffer,
                                 char_pressed,
                                 active_buffer.cursor_coords,
@@ -686,7 +347,7 @@ pub fn runEditor() !void {
                             //- cabarger: No-op if we are at 0,0.
                             if (active_buffer.cursor_coords.row != 0 or active_buffer.cursor_coords.col != 0) {
                                 active_buffer.cursorMove(.{ 0, -1 });
-                                bufferRemoveCharAt(
+                                Buffer.bufferRemoveCharAt(
                                     active_buffer,
                                     active_buffer.cursor_coords,
                                 );
@@ -694,7 +355,7 @@ pub fn runEditor() !void {
                         } else if (key_pressed == rl.KEY_ENTER) {
                             //- cabarger: Insert newline character
                             var line_node = active_buffer.currentLine();
-                            var char_node = bufferInsertCharAt(
+                            var char_node = Buffer.bufferInsertCharAt(
                                 active_buffer,
                                 '\n',
                                 active_buffer.cursor_coords,
@@ -706,7 +367,7 @@ pub fn runEditor() !void {
                                 new_line_node.next = null;
                                 var curr_char_node = char_node.next;
                                 while (curr_char_node != null) {
-                                    var new_char_node = bufferNewCharNode(active_buffer, curr_char_node.?.data);
+                                    var new_char_node = Buffer.bufferNewCharNode(active_buffer, curr_char_node.?.data);
                                     new_line_node.data.append(new_char_node);
 
                                     var last = curr_char_node;
@@ -718,13 +379,8 @@ pub fn runEditor() !void {
                             active_buffer.lines.insertAfter(line_node, new_line_node);
                             active_buffer.cursorMove(.{ 1, 0 });
                         } else if (key_pressed == rl.KEY_TAB) {
-                            const line_node = active_buffer.currentLine();
-                            try indentChars(
-                                &active_buffer.char_nodes_pool,
-                                &line_node.data,
-                                line_node.data.first,
-                            );
-                            active_buffer.cursor_coords.col += shift_width;
+                            try active_buffer.indentLine();
+                            active_buffer.cursor_coords.col += Buffer.shift_width;
                         }
                     },
                     .command => {
@@ -746,7 +402,7 @@ pub fn runEditor() !void {
                                     target_rot = 360.0;
                                 } else if (mem.eql(u8, command_buffer_first, "w")) {
                                     if (active_buffer.backed_by_file) {
-                                        try bufferWriteToDisk(active_buffer);
+                                        try Buffer.bufferWriteToDisk(active_buffer);
                                     }
                                 } else if (mem.eql(u8, command_buffer_first, "o")) {
                                     const next_piece = command_buffer_pieces.next();
@@ -764,8 +420,8 @@ pub fn runEditor() !void {
                                             }
                                         }
                                         if (existing_buffer_with_this_path == null) {
-                                            var new_buffer = buffersGetAvail(&buffers) orelse buffersReleaseColdest(&buffers) catch unreachable;
-                                            try bufferLoadFile(new_buffer, scratch_arena, next_piece.?);
+                                            var new_buffer = Buffer.reserve(&buffers) orelse Buffer.releaseColdest(&buffers) catch unreachable;
+                                            try new_buffer.loadFile(next_piece.?);
                                             active_buffer = new_buffer;
                                         } else {
                                             active_buffer = existing_buffer_with_this_path.?;
@@ -1110,7 +766,7 @@ pub fn runEditor() !void {
                 var selection_width = if (is_last_row)
                     refrence_glyph_info.image.width * @as(c_int, @intCast((end_col - start_col) + 1))
                 else
-                    refrence_glyph_info.image.width * @as(c_int, @intCast(active_buffer.lineFromCursorRow(
+                    refrence_glyph_info.image.width * @as(c_int, @intCast(active_buffer.lineFromRow(
                         start_row + row_count,
                     ).data.len));
 
