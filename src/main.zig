@@ -7,22 +7,21 @@
 //!
 
 //- cabarger: Use this thing to build itself:
-// - Port what I already had working [ ]
-// - "Data loss very bad" now you say "data loss very bad." [ ]
-// - The empty file... [ ]
-// - Windows support
-//    - handle '\r'
+// Port what I already had working [ ]
+// "Data loss very bad" now you say "data loss very bad." [ ]
+// The empty file... [ ]
+// Handle '\r' ??? [ ]
 
 //- cabarger: Approaching usable editor:
-// - Nav / basic actions [ ]
-//     - Smart indents on line break [ ]
-// - Basic history [ ]
-//    - Registers??
-// - Scrolling past start and end of text  [ ]
+// Nav / basic actions [ ]
+//  Smart indents on line break [ ]
+// Basic history [ ]
+//  Registers??
+// Scrolling past start and end of text  [ ]
 
 //- cabarger: Eventually..
 // VSPLIT
-// - Move off of raylib
+// Move off of raylib
 
 const std = @import("std");
 const rl = @import("rl.zig");
@@ -34,6 +33,9 @@ const heap = std.heap;
 const TCTX = base_thread_context.TCTX;
 const ArrayList = std.ArrayList;
 const TailQueue = std.TailQueue;
+
+
+const Vec2U32 = @Vector(2, u32);
 
 const background_color = rl.Color{ .r = 30, .g = 30, .b = 30, .a = 255 };
 
@@ -56,6 +58,10 @@ const BufferCoords = packed struct {
     col: usize,
 };
 
+//- NOTE(cabarger): Play around with this type alias...
+// I'll probably change it later.
+const BufferLine = TailQueue(TailQueue(u8)).Node;
+
 const Buffer = struct {
     arena: heap.ArenaAllocator,
 
@@ -76,6 +82,88 @@ const Buffer = struct {
     modified_time: f64,
 
     active: bool, //- cabarger: Probably can infer this? Also rename this... Possibly loaded or open?
+
+    inline fn cursorRight(
+        buffer: *Buffer,
+        p: @Vector(2, usize),
+    ) BufferCoords {
+        var result: @Vector(2, isize) = @intCast(p);
+        if (buffer.isValidCursorP(result + @Vector(2, isize){ 1, 0 })) {
+            result[0] += 1;
+        } else if (buffer.isValidCursorP(@Vector(2, isize){ 0, result[1] + 1 })) {
+            result = .{ 0, result[1] + 1 };
+        }
+        return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
+    }
+
+    inline fn cursorLeft(
+        buffer: *Buffer,
+        p: @Vector(2, usize),
+    ) BufferCoords {
+        var result: @Vector(2, isize) = @intCast(p);
+        if (buffer.isValidCursorP(result - @Vector(2, isize){ 1, 0 })) {
+            result[0] -= 1;
+        } else if (buffer.isValidCursorP(@Vector(2, isize){ 0, result[1] - 1 })) {
+            var line_node = buffer.lineFromCursorRow(@intCast(result[1] - 1));
+            result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] - 1) };
+        }
+        return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
+    }
+
+    inline fn cursorUp(
+        buffer: *Buffer,
+        p: @Vector(2, usize),
+    ) BufferCoords {
+        var result: @Vector(2, isize) = @intCast(p);
+        if (buffer.isValidCursorP(result - @Vector(2, isize){ 0, 1 })) {
+            result[1] -= 1;
+        } else if (buffer.isValidCursorP(@Vector(2, isize){ 0, result[1] - 1 })) {
+            var line_node = buffer.lineFromCursorRow(@intCast(result[1] - 1));
+            result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] - 1) };
+        }
+        return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
+    }
+
+    inline fn cursorDown(
+        buffer: *Buffer,
+        p: @Vector(2, usize),
+    ) BufferCoords {
+        var result: @Vector(2, isize) = @intCast(p);
+        if (buffer.isValidCursorP(result + @Vector(2, isize){ 0, 1 })) {
+            result[1] += 1;
+        } else if (buffer.isValidCursorP(@Vector(2, isize){ 0, result[1] + 1 })) {
+            var line_node = buffer.lineFromCursorRow(@intCast(result[1] + 1));
+            result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] + 1) };
+        }
+        return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
+    }
+    
+    fn cursorMove(buffer: *Buffer, p: @Vector(2, usize))
+
+    pub inline fn isValidCursorP(buffer: *Buffer, p: @Vector(2, isize)) bool {
+        var result = false;
+        if (@reduce(.And, (p >= @Vector(2, isize){ 0, 0 }))) {
+            var line_node = buffer.lineFromCursorRow(@intCast(p[1]));
+            var char_node = charNodeFromLineAndCol(line_node, @intCast(p[0]));
+            result = (char_node.data != 0);
+        }
+        return result;
+    }
+
+    pub fn lineFromCursorRow(buffer: *Buffer, row: usize) *BufferLine {
+        var result = buffer.lines.first;
+        var line_index: usize = 0;
+        while (result != null) : (result = result.?.next) {
+            if (line_index == row)
+                return result.?;
+            line_index += 1;
+        }
+        return &nil_line_node;
+    }
+
+    pub fn currentLine(buffer: *Buffer) *BufferLine {
+        return buffer.lineFromCursorRow(buffer.cursor_coords.row);
+    }
 };
 
 fn bufferInit(buffer: *Buffer) void {
@@ -229,19 +317,6 @@ fn buffersReleaseColdest(buffers: []Buffer) !*Buffer {
     return coldest_buffer;
 }
 
-inline fn isValidCursorP(
-    lines: *TailQueue(TailQueue(u8)),
-    p: @Vector(2, isize),
-) bool {
-    var result = false;
-    if (@reduce(.And, (p >= @Vector(2, isize){ 0, 0 }))) {
-        var line_node = lineNodeFromRow(lines, @intCast(p[1]));
-        var char_node = charNodeFromLineAndCol(line_node, @intCast(p[0]));
-        result = (char_node.data != 0);
-    }
-    return result;
-}
-
 const shift_width = 4;
 const default_font_size = 20;
 
@@ -259,52 +334,13 @@ fn charNodeFromLineAndCol(
     return &nil_char_node;
 }
 
-inline fn lineNodeFromRow(
-    lines: *TailQueue(TailQueue(u8)),
-    row: usize,
-) *TailQueue(TailQueue(u8)).Node {
-    var result = lines.first;
-    var line_index: usize = 0;
-    while (result != null) : (result = result.?.next) {
-        if (line_index == row)
-            return result.?;
-        line_index += 1;
-    }
-    return &nil_line_node;
-}
-
-inline fn cursorRight(
-    lines: *TailQueue(TailQueue(u8)),
-    p: @Vector(2, usize),
-) BufferCoords {
-    var result: @Vector(2, isize) = @intCast(p);
-    if (isValidCursorP(lines, result + @Vector(2, isize){ 1, 0 })) {
-        result[0] += 1;
-    } else if (isValidCursorP(lines, @Vector(2, isize){ 0, result[1] + 1 })) {
-        result = .{ 0, result[1] + 1 };
-    }
-    return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
-}
-
-inline fn cursorLeft(
-    lines: *TailQueue(TailQueue(u8)),
-    p: @Vector(2, usize),
-) BufferCoords {
-    var result: @Vector(2, isize) = @intCast(p);
-    if (isValidCursorP(lines, result - @Vector(2, isize){ 1, 0 })) {
-        result[0] -= 1;
-    } else if (isValidCursorP(lines, @Vector(2, isize){ 0, result[1] - 1 })) {
-        var line_node = lineNodeFromRow(lines, @intCast(result[1] - 1));
-        result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] - 1) };
-    }
-    return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
-}
-
 fn bufferInsertCharAt(buffer: *Buffer, char: u8, cursor_coords: BufferCoords) *TailQueue(u8).Node {
     var line_node = lineNodeFromRow(
         &buffer.lines,
         cursor_coords.row,
     );
+    var buffer_line = buffer.line();
+    _ = buffer_line;
     const char_node = charNodeFromLineAndCol(
         line_node,
         cursor_coords.col,
@@ -355,34 +391,6 @@ fn bufferRemoveCharAt(buffer: *Buffer, cursor_coords: BufferCoords) void {
             buffer.line_nodes_pool.destroy(current_line_node);
         }
     }
-}
-
-inline fn cursorUp(
-    lines: *TailQueue(TailQueue(u8)),
-    p: @Vector(2, usize),
-) BufferCoords {
-    var result: @Vector(2, isize) = @intCast(p);
-    if (isValidCursorP(lines, result - @Vector(2, isize){ 0, 1 })) {
-        result[1] -= 1;
-    } else if (isValidCursorP(lines, @Vector(2, isize){ 0, result[1] - 1 })) {
-        var line_node = lineNodeFromRow(lines, @intCast(result[1] - 1));
-        result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] - 1) };
-    }
-    return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
-}
-
-inline fn cursorDown(
-    lines: *TailQueue(TailQueue(u8)),
-    p: @Vector(2, usize),
-) BufferCoords {
-    var result: @Vector(2, isize) = @intCast(p);
-    if (isValidCursorP(lines, result + @Vector(2, isize){ 0, 1 })) {
-        result[1] += 1;
-    } else if (isValidCursorP(lines, @Vector(2, isize){ 0, result[1] + 1 })) {
-        var line_node = lineNodeFromRow(lines, @intCast(result[1] + 1));
-        result = .{ @intCast(line_node.data.len - 1), @intCast(result[1] + 1) };
-    }
-    return BufferCoords{ .row = @intCast(result[1]), .col = @intCast(result[0]) };
 }
 
 fn cellPFromCoords(
@@ -574,8 +582,8 @@ pub fn runEditor() !void {
                                 },
                             );
                         } else if (key_pressed == rl.KEY_RIGHT or char_pressed == 'l') {
-                            active_buffer.cursor_coords = cursorRight(
-                                &active_buffer.lines,
+                            active_buffer.moveCursor(.{ 0, 1 });
+                            active_buffer.cursor_coords = active_buffer.cursorRight(
                                 .{
                                     active_buffer.cursor_coords.col,
                                     active_buffer.cursor_coords.row,
@@ -954,6 +962,9 @@ pub fn runEditor() !void {
                             active_buffer.cursor_coords.col = 0;
                             active_buffer.cursor_coords.row = active_buffer.cursor_coords.row;
                         } else if (char_pressed == 'd') {
+                            const line = lineNodeFromRow(&active_buffer.lines, active_buffer.cursor_coords.col);
+                            _ = line;
+
                             const cursor_coords_point_index = 0;
 
                             var selection_start: BufferCoords = undefined;
